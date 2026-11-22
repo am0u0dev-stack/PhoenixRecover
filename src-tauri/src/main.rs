@@ -91,12 +91,13 @@ fn list_sources() -> Vec<SourceInfo> {
             let root = format!("{letter}:\\");
             let p = Path::new(&root);
             if p.is_dir() {
+                let device_type = guess_device_type(p);
                 out.push(SourceInfo {
                     name: format!("Drive {letter}"),
                     path: root,
                     kind: SourceKind::Drive,
                     size_bytes: 0,
-                    device_type: guess_device_type(p),
+                    device_type,
                     read_only: true,
                 });
             }
