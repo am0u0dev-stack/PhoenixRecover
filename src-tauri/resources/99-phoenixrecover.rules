@@ -1,0 +1,15 @@
+# PhoenixRecover — read-only raw-device access for unprivileged users.
+#
+# Grants the `plugdev` group read access to block devices so scans can run
+# without sudo. Write access is never granted: recovery is read-only by design.
+# The rule ships in the .deb at /usr/lib/udev/rules.d/ and is loaded on the
+# next plug/unplug (or `sudo udevadm trigger`).
+#
+# USB and SATA/SCSI disks and card readers
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", MODE="0440", GROUP="plugdev"
+# NVMe SSDs
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="nvme*", MODE="0440", GROUP="plugdev"
+# MMC / SD cards
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="mmcblk*", MODE="0440", GROUP="plugdev"
+# Loop devices (disk images)
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="loop*", MODE="0440", GROUP="plugdev"

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  polkit policy: allow members of `plugdev` to read block devices through
+  PhoenixRecover without entering an administrator password. The action only
+  covers read-only device access for recovery scans.
+-->
+<!DOCTYPE policyconfig PUBLIC
+  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="com.mlai.phoenixrecover.read-block-device">
+    <description>Read block devices read-only for data recovery</description>
+    <message>PhoenixRecover needs read access to a drive or memory card to scan it. No data is ever written to the source.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

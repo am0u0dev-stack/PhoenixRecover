@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Main window permissions: dialog for source/output selection, core events for scan progress.","local":true,"windows":["main"],"permissions":["core:default","core:event:default","dialog:allow-open","dialog:default"]}}
