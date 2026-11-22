@@ -31,8 +31,8 @@ export default function LiquidFab({ onQuickScan, onDeepScan, onSettings, disable
       <div style={{ position: "relative", width: 44, height: 44 }}>
         <Liquid fill={light ? "#ececee" : "#202020"}>
           <Liquid.Item
-            x={open ? -54 : 0}
-            y={open ? -34 : 0}
+            x={open ? 14 : 0}
+            y={open ? -62 : 0}
             scale={open ? 1 : 0}
             style={atOrigin}
             transition={{ duration: 550, ease }}
@@ -50,8 +50,8 @@ export default function LiquidFab({ onQuickScan, onDeepScan, onSettings, disable
             </button>
           </Liquid.Item>
           <Liquid.Item
-            x={0}
-            y={open ? -64 : 0}
+            x={open ? -45 : 0}
+            y={open ? -45 : 0}
             scale={open ? 1 : 0}
             style={atOrigin}
             transition={{ duration: 550, ease }}
@@ -69,8 +69,8 @@ export default function LiquidFab({ onQuickScan, onDeepScan, onSettings, disable
             </button>
           </Liquid.Item>
           <Liquid.Item
-            x={open ? 54 : 0}
-            y={open ? -34 : 0}
+            x={open ? -62 : 0}
+            y={open ? 14 : 0}
             scale={open ? 1 : 0}
             style={atOrigin}
             transition={{ duration: 550, ease }}
