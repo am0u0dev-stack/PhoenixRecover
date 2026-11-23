@@ -78,7 +78,7 @@ export default function LiquidFab({ onQuickScan, onDeepScan, onSettings, disable
           >
             <button
               className="round-btn"
-              title="Settings (toggle light/dark)"
+              title="Settings & engine info"
               aria-label="Settings"
               disabled={disabled}
               tabIndex={open ? 0 : -1}

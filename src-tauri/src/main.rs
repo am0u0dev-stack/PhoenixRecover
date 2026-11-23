@@ -159,12 +159,18 @@ fn scan_drive(
     if is_drive_root(&p) {
         let raw = raw_volume(&p);
         if deep {
-            if let Err(e) = engine::carve_scan(&raw, &kinds, &mut files, &mut notes, handle, resume) {
-                if raw_open_denied(&e) {
-                    notes.push("raw volume access denied — right-click PhoenixRecover and run as administrator to scan a drive".into());
-                } else {
-                    return Err(format!("deep scan failed: {e}"));
+            // Carving goes through PhotoRec here too: it reads the raw volume
+            // itself and carves by signature, which also recovers formatted
+            // media (unearth's reader failed on some volume handles with
+            // "reading from source").
+            match photorec_pass::run(&raw, &engine::staging_root_pub(), &kinds, &mut notes) {
+                Ok(out_dir) => {
+                    let allowed = engine::allowed_exts(&kinds);
+                    engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
                 }
+                Err(e) => notes.push(format!(
+                    "deep scan of {raw:?} failed: {e} — if access is denied, right-click PhoenixRecover and run as administrator"
+                )),
             }
         } else {
             match engine::undelete_scan(&raw, &kinds, &mut files, &mut notes, handle) {

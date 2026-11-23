@@ -7,6 +7,7 @@ import SsdWarning from "./components/SsdWarning";
 import SourceList from "./components/SourceList";
 import ResultsTable from "./components/ResultsTable";
 import HistoryPanel from "./components/HistoryPanel";
+import SettingsModal from "./components/SettingsModal";
 import { cancelScan, checkpointStatus, listSources, onScanProgress, recoverFiles, scanDrive } from "./api";
 import type { CheckpointStatus, RecoverableFile, RecoveryReport, ScanProgress, SourceInfo } from "./types";
 
@@ -30,6 +31,7 @@ export default function App() {
   const [historyKey, setHistoryKey] = useState(0);
   const [kinds, setKinds] = useState<RecoverKind[]>([...ALL_KINDS]);
   const [picker, setPicker] = useState<{ deep: boolean } | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const pendingScan = useRef<{ path: string; deep: boolean } | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
 
@@ -406,9 +408,16 @@ export default function App() {
       <LiquidFab
         onQuickScan={() => scanViaFab(false)}
         onDeepScan={() => scanViaFab(true)}
-        onSettings={() => setLight(!light)}
+        onSettings={() => setShowSettings(true)}
         light={light}
         disabled={scanning}
+      />
+
+      <SettingsModal
+        open={showSettings}
+        light={light}
+        onToggleTheme={() => setLight((l) => !l)}
+        onClose={() => setShowSettings(false)}
       />
 
       <KindPicker
