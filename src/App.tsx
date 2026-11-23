@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw, FolderOpen, Sun, Moon, Download, HardDrive, Undo2, ShieldCheck } from "lucide-react";
 import LiquidFab from "./components/LiquidFab";
+import KindPicker, { ALL_KINDS, type RecoverKind } from "./components/KindPicker";
 import ScanModal from "./components/ScanModal";
 import SsdWarning from "./components/SsdWarning";
 import SourceList from "./components/SourceList";
@@ -26,6 +27,8 @@ export default function App() {
   const [showSsdWarning, setShowSsdWarning] = useState(false);
   const [checkpoint, setCheckpoint] = useState<CheckpointStatus | null>(null);
   const [historyKey, setHistoryKey] = useState(0);
+  const [kinds, setKinds] = useState<RecoverKind[]>([...ALL_KINDS]);
+  const [picker, setPicker] = useState<{ deep: boolean } | null>(null);
   const pendingScan = useRef<{ path: string; deep: boolean } | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
 
@@ -63,14 +66,14 @@ export default function App() {
     };
   }, []);
 
-  const runScan = useCallback(async (path: string, deep: boolean, resume = false) => {
+  const runScan = useCallback(async (path: string, deep: boolean, resume = false, kindList: RecoverKind[] = []) => {
     setScanning(true);
     setScanDeep(deep);
     setProgress(null);
     setError(null);
     setReport(null);
     try {
-      const found = await scanDrive(path, deep, resume);
+      const found = await scanDrive(path, deep, resume, kindList);
       setFiles(found);
       setSelectedIds(new Set());
       setHistoryKey((k) => k + 1);
@@ -89,7 +92,7 @@ export default function App() {
       return;
     }
     let cancelled = false;
-    checkpointStatus(selectedSource.path)
+    checkpointStatus(selectedSource.path, kinds)
       .then((c) => {
         if (!cancelled) setCheckpoint(c);
       })
@@ -97,7 +100,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSource, status]);
+  }, [selectedSource, status, kinds]);
 
   const selectSource = useCallback((s: SourceInfo) => {
     setSelectedSource(s);
@@ -109,18 +112,26 @@ export default function App() {
     setCheckpoint(null);
   }, []);
 
-  // Flow from the FAB: pick a folder if nothing is selected yet, then scan it.
+  // Flow from the FAB: ask what to recover first, then pick a folder (when
+  // the FAB started the flow with nothing selected), then scan it.
   const scanViaFab = useCallback(
-    async (deep: boolean) => {
-      if (selectedSource) {
-        await runScan(selectedSource.path, deep);
-        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-        return;
-      }
-      pendingScan.current = { path: "", deep };
-      try {
-        const dir = await import("@tauri-apps/plugin-dialog").then((m) => m.open({ directory: true }));
-        if (typeof dir === "string") {
+    (deep: boolean) => {
+      setPicker({ deep });
+    },
+    [],
+  );
+
+  // Picker confirmed: remember the selection, resolve the source and scan.
+  const confirmPick = useCallback(
+    async (picked: RecoverKind[]) => {
+      const deep = picker?.deep ?? false;
+      setKinds(picked);
+      setPicker(null);
+      let target = pendingScan.current?.path || selectedSource?.path;
+      if (!target) {
+        try {
+          const dir = await import("@tauri-apps/plugin-dialog").then((m) => m.open({ directory: true }));
+          if (typeof dir !== "string") return;
           const s: SourceInfo = {
             name: dir.split(/[\\/]/).pop() || dir,
             path: dir,
@@ -130,20 +141,24 @@ export default function App() {
             read_only: true,
           };
           setSelectedSource(s);
-          await runScan(dir, deep);
+          target = dir;
+        } catch (e) {
+          // In the browser preview the dialog/engine is unavailable; say so
+          // inline instead of surfacing a raw TypeError.
+          const msg = String(e);
+          setError(
+            msg.includes("invoke") || msg.includes("dialog")
+              ? "The native dialog is not reachable from this preview. Run the desktop app to pick a folder and scan."
+              : msg,
+          );
+          return;
         }
-      } catch (e) {
-        // In the browser preview the dialog/engine is unavailable; say so
-        // inline instead of surfacing a raw TypeError.
-        const msg = String(e);
-        setError(
-          msg.includes("invoke") || msg.includes("dialog")
-            ? "The native dialog is not reachable from this preview. Run the desktop app to pick a folder and scan."
-            : msg,
-        );
       }
+      pendingScan.current = null;
+      runScan(target, deep, false, picked);
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     },
-    [selectedSource, runScan],
+    [picker, selectedSource, runScan],
   );
 
   const toggle = useCallback((id: string) => {
@@ -269,14 +284,14 @@ export default function App() {
                 <>
                   <button
                     className="btn"
-                    onClick={() => runScan(selectedSource.path, false)}
+                    onClick={() => setPicker({ deep: false })}
                     disabled={scanning}
                   >
                     <HardDrive size={16} aria-hidden /> Quick Scan
                   </button>
                   <button
                     className="btn"
-                    onClick={() => runScan(selectedSource.path, true)}
+                    onClick={() => setPicker({ deep: true })}
                     disabled={scanning}
                   >
                     Deep Scan
@@ -298,7 +313,7 @@ export default function App() {
                 </span>
                 <button
                   className="btn h-9 min-h-9 px-3 text-xs"
-                  onClick={() => selectedSource && runScan(selectedSource.path, true, true)}
+                  onClick={() => selectedSource && runScan(selectedSource.path, true, true, kinds)}
                   disabled={scanning}
                 >
                   <Undo2 size={14} aria-hidden /> Resume deep scan
@@ -382,6 +397,14 @@ export default function App() {
         onSettings={() => setLight(!light)}
         light={light}
         disabled={scanning}
+      />
+
+      <KindPicker
+        open={picker !== null}
+        deep={picker?.deep ?? false}
+        initial={kinds}
+        onConfirm={confirmPick}
+        onCancel={() => setPicker(null)}
       />
 
       <ScanModal

@@ -17,9 +17,37 @@ use unearth::source::Source;
 
 use crate::types::{ProgressPhase, RecoverableFile, ScanProgress, ScanStrategy};
 
-/// Formats surfaced by the engines (spec minimum: jpg png pdf docx pptx xlsx
-/// zip rar mp4 mov — and every other signature unearth ships).
-pub const TARGET_TYPES: &[&str] = &["jpg", "png", "pdf", "docx", "pptx", "xlsx", "zip", "rar", "mp4", "mov"];
+/// Recoverable categories, mapped straight onto unearth's category names so
+/// the picker can select a whole class (e.g. every image format) by one name.
+pub const ALL_KINDS: &[&str] = &["image", "video", "document", "audio", "archive"];
+
+/// Resolve the picker's category list (missing/empty = everything) to the set
+/// of file extensions in those categories. Filtered directly over the full
+/// signature table — `select("document")` alone misses the zip-based OOXML
+/// formats (docx/xlsx/pptx), which are carved by the forsmost pass instead.
+pub fn allowed_exts(kinds: &[String]) -> std::collections::HashSet<String> {
+    use unearth::signatures::{category_of, Category, SIGNATURES};
+    let picked: Vec<String> = if kinds.is_empty() {
+        ALL_KINDS.iter().map(|s| s.to_string()).collect()
+    } else {
+        kinds.to_vec()
+    };
+    let picked_cats: Vec<Category> = picked
+        .iter()
+        .filter_map(|k| Category::from_name(k))
+        .collect();
+    let mut exts: std::collections::HashSet<String> = SIGNATURES
+        .iter()
+        .filter(|s| picked_cats.iter().any(|c| *c == category_of(s.ext)))
+        .map(|s| s.ext.to_string())
+        .collect();
+    // OOXML formats carry no signature of their own (zip-based, classified by
+    // content) — they are carved by the forsmost pass when documents are picked.
+    if picked_cats.contains(&Category::Document) {
+        exts.extend(["docx", "xlsx", "pptx"].map(String::from));
+    }
+    exts
+}
 
 /// True while a scan is running; checked by carve progress + engine loops.
 pub static CANCEL: AtomicBool = AtomicBool::new(false);
@@ -104,29 +132,33 @@ pub fn no_progress() -> NoProgress {
     NoProgress
 }
 
-/// Deterministic key for a source path: the same source always maps to the
-/// same carve output directory and checkpoint file, which is what makes
-/// interrupted deep scans resumable across app restarts.
-pub fn source_key(path: &Path) -> String {
+/// Deterministic key for a source path plus the selected kinds: the same
+/// (source, kinds) pair always maps to the same carve output directory and
+/// checkpoint file, which is what makes interrupted deep scans resumable
+/// across app restarts while a changed selection starts a fresh scan.
+pub fn source_key(path: &Path, kinds: &[String]) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let canon = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut h = DefaultHasher::new();
     canon.hash(&mut h);
+    let mut sorted = kinds.to_vec();
+    sorted.sort();
+    sorted.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
-/// Stable per-source output directory for carved files (required to be
-/// identical between the original run and any resume).
-pub fn carve_dir_for(path: &Path) -> PathBuf {
-    staging_root().join(format!("carve-{}", source_key(path)))
+/// Stable per-(source, kinds) output directory for carved files (required to
+/// be identical between the original run and any resume).
+pub fn carve_dir_for(path: &Path, kinds: &[String]) -> PathBuf {
+    staging_root().join(format!("carve-{}", source_key(path, kinds)))
 }
 
-/// Stable per-source checkpoint file used by unearth's `resume` support.
-pub fn checkpoint_for(path: &Path) -> PathBuf {
+/// Stable per-(source, kinds) checkpoint file used by unearth's `resume`.
+pub fn checkpoint_for(path: &Path, kinds: &[String]) -> PathBuf {
     let base = staging_root().join("checkpoints");
     fs::create_dir_all(&base).ok();
-    base.join(format!("{}.ckpt", source_key(path)))
+    base.join(format!("{}.ckpt", source_key(path, kinds)))
 }
 
 fn staging_root() -> PathBuf {
@@ -164,6 +196,7 @@ fn stamp() -> String {
 /// Returns stats when a filesystem was recognised.
 pub fn undelete_scan(
     path: &Path,
+    kinds: &[String],
     files: &mut Vec<RecoverableFile>,
     notes: &mut Vec<String>,
     app: Option<tauri::AppHandle>,
@@ -212,7 +245,8 @@ pub fn undelete_scan(
     }
 
     let n: u64 = all_stats.iter().map(|s| s.recovered).sum();
-    collect_staged(&out_dir, ScanStrategy::Undelete, files, n as usize);
+    let allowed = allowed_exts(kinds);
+    collect_staged(&out_dir, ScanStrategy::Undelete, files, n as usize, &allowed);
     Ok(all_stats)
 }
 
@@ -233,7 +267,13 @@ fn volume_name(volume: &Volume) -> String {
 }
 
 /// Walk a staging directory and turn validated copies into result rows.
-fn collect_staged(dir: &Path, strategy: ScanStrategy, files: &mut Vec<RecoverableFile>, _recovered: usize) {
+fn collect_staged(
+    dir: &Path,
+    strategy: ScanStrategy,
+    files: &mut Vec<RecoverableFile>,
+    _recovered: usize,
+    allowed: &std::collections::HashSet<String>,
+) {
     let mut stack = vec![dir.to_path_buf()];
     let mut seen = 0usize;
     while let Some(d) = stack.pop() {
@@ -255,7 +295,7 @@ fn collect_staged(dir: &Path, strategy: ScanStrategy, files: &mut Vec<Recoverabl
                 .filter(|e| !e.is_empty())
                 .or_else(|| guess_ext(&p))
                 .unwrap_or_else(|| "bin".into());
-            if !TARGET_TYPES.iter().any(|t| ext.eq_ignore_ascii_case(t)) {
+            if !allowed.iter().any(|t| ext.eq_ignore_ascii_case(t)) {
                 continue;
             }
             seen += 1;
@@ -283,6 +323,7 @@ fn guess_ext(path: &Path) -> Option<String> {
 /// Office-format pass through the real forsmost engine.
 pub fn carve_scan(
     path: &Path,
+    kinds: &[String],
     files: &mut Vec<RecoverableFile>,
     notes: &mut Vec<String>,
     app: Option<tauri::AppHandle>,
@@ -293,19 +334,29 @@ pub fn carve_scan(
 
     // Deterministic output dir + checkpoint so an interrupted scan can be
     // resumed later (unearth requires identical output dir and options).
-    let out_dir = carve_dir_for(path);
-    let checkpoint = checkpoint_for(path);
+    let out_dir = carve_dir_for(path, kinds);
+    let checkpoint = checkpoint_for(path, kinds);
     fs::create_dir_all(&out_dir)?;
     if resume {
         progress.set_note("resuming from checkpoint");
     }
 
     let src = Source::open(path)?;
-    let active = unearth::signatures::select(
-        &TARGET_TYPES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-    )?;
-
-    let opts = CarveOptions {
+    // Carve with every signature in the picked categories; OOXML office files
+    // (docx/xlsx/pptx) are zip-based and recovered by the forsmost pass below.
+    let picked: Vec<String> = if kinds.is_empty() {
+        ALL_KINDS.iter().map(|s| s.to_string()).collect()
+    } else {
+        kinds.to_vec()
+    };
+    let picked_cats: Vec<unearth::signatures::Category> = picked
+        .iter()
+        .filter_map(|k| unearth::signatures::Category::from_name(k))
+        .collect();
+    let active: Vec<&'static unearth::signatures::Signature> = unearth::signatures::SIGNATURES
+        .iter()
+        .filter(|s| picked_cats.iter().any(|c| *c == unearth::signatures::category_of(s.ext)))
+        .collect();    let opts = CarveOptions {
         output_dir: out_dir.clone(),
         start: 0,
         end: None,
@@ -330,28 +381,34 @@ pub fn carve_scan(
         stats.files_recovered, stats.bytes_recovered
     ));
 
-    collect_staged(&out_dir, ScanStrategy::Carve, files, stats.files_recovered as usize);
+    collect_staged(&out_dir, ScanStrategy::Carve, files, stats.files_recovered as usize, &allowed_exts(kinds));
 
     if was_cancelled() {
         return Ok(());
     }
 
-    // Office formats through the real forsmost engine.
-    if let Some(handle) = &app {
-        let _ = handle.emit(
-            "scan-progress",
-            ScanProgress {
-                phase: ProgressPhase::Office,
-                percent: -1.0,
-                bytes_scanned: 0,
-                total_bytes: 0,
-                note: "forsmost: docx/pptx/xlsx pass".into(),
-            },
-        );
-    }
-    match crate::forsmost_pass::run(path, &staging_root(), notes) {
-        Ok(office_dir) => collect_staged(&office_dir, ScanStrategy::Carve, files, 0),
-        Err(_) => { /* note already recorded; unearth signatures covered these types */ }
+    // Office formats through the real forsmost engine (skip when the picker
+    // excluded documents — unearth's document signatures still carved OOXML).
+    if kinds.iter().any(|k| k.eq_ignore_ascii_case("document")) {
+        if let Some(handle) = &app {
+            let _ = handle.emit(
+                "scan-progress",
+                ScanProgress {
+                    phase: ProgressPhase::Office,
+                    percent: -1.0,
+                    bytes_scanned: 0,
+                    total_bytes: 0,
+                    note: "forsmost: docx/pptx/xlsx pass".into(),
+                },
+            );
+        }
+        match crate::forsmost_pass::run(path, &staging_root(), notes) {
+            Ok(office_dir) => {
+                let allowed = allowed_exts(kinds);
+                collect_staged(&office_dir, ScanStrategy::Carve, files, 0, &allowed)
+            }
+            Err(_) => { /* note already recorded; unearth signatures covered these types */ }
+        }
     }
 
     progress.set_note("scan complete");

@@ -174,3 +174,4 @@ fn carve_checkpoint_resume_round_trip() {
     }
     assert!(png_ok && jpg_ok, "resumed carve must keep byte-identical copies");
 }
+

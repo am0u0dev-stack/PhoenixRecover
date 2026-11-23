@@ -136,24 +136,26 @@ fn scan_drive(
     path: String,
     deep: bool,
     resume: bool,
+    kinds: Option<Vec<String>>,
 ) -> Result<Vec<RecoverableFile>, String> {
     engine::reset_cancel();
     let p = PathBuf::from(&path);
     if !p.exists() {
         return Err(format!("source does not exist: {path}"));
     }
+    let kinds = normalize_kinds(kinds);
 
     let mut files: Vec<RecoverableFile> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let handle = Some(app);
 
     if p.is_dir() {
-        scan_folder(&p, deep, resume, &mut files, &mut notes, handle)?;
+        scan_folder(&p, deep, resume, &kinds, &mut files, &mut notes, handle)?;
     } else if deep {
-        engine::carve_scan(&p, &mut files, &mut notes, handle, resume)
+        engine::carve_scan(&p, &kinds, &mut files, &mut notes, handle, resume)
             .map_err(|e| format!("deep scan failed: {e}"))?;
     } else {
-        match engine::undelete_scan(&p, &mut files, &mut notes, handle) {
+        match engine::undelete_scan(&p, &kinds, &mut files, &mut notes, handle) {
             Ok(stats) => {
                 if stats.is_empty() {
                     notes.push("no metadata candidates — try Deep Scan for signature carving".into());
@@ -180,17 +182,27 @@ fn scan_drive(
     Ok(result)
 }
 
+/// Fill in the picker's selection: missing/empty means every category.
+fn normalize_kinds(kinds: Option<Vec<String>>) -> Vec<String> {
+    match kinds {
+        Some(list) if !list.is_empty() => list,
+        _ => engine::ALL_KINDS.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
 /// Folder source: identify files by signature (quick) and/or carve inside
 /// them (deep). The folder itself is only ever read.
 fn scan_folder(
     dir: &Path,
     deep: bool,
     resume: bool,
+    kinds: &[String],
     files: &mut Vec<RecoverableFile>,
     notes: &mut Vec<String>,
     app: Option<tauri::AppHandle>,
 ) -> Result<(), String> {
     let _ = app;
+    let allowed = engine::allowed_exts(kinds);
     let mut count = 0usize;
     visit_files(dir, &mut |p, meta| {
         let mut buf = [0u8; 16];
@@ -204,7 +216,7 @@ fn scan_folder(
         }
         let detected = unearth::identify::identify(&buf);
         if let Some(d) = detected {
-            if engine::TARGET_TYPES.iter().any(|t| d.ext.eq_ignore_ascii_case(t)) {
+            if allowed.iter().any(|t| d.ext.eq_ignore_ascii_case(t)) {
                 let id = format!("f-{}", NEXT_ID.fetch_add(1, Ordering::SeqCst));
                 files.push(RecoverableFile {
                     id,
@@ -225,7 +237,7 @@ fn scan_folder(
     if deep {
         // Carve the folder for residual/embedded data beyond what signatures
         // show at offset 0: each file is carved through the same engine.
-        engine::carve_scan(dir, files, notes, None, resume)
+        engine::carve_scan(dir, kinds, files, notes, None, resume)
             .map_err(|e| format!("deep scan failed: {e}"))?;
     }
     Ok(())
@@ -307,10 +319,11 @@ fn scan_history() -> Vec<store::HistoryEntry> {
 /// Check whether an interrupted deep scan left a resumable checkpoint for
 /// this source. The frontend surfaces a "Resume deep scan" action when true.
 #[tauri::command]
-fn checkpoint_status(path: String) -> CheckpointStatus {
+fn checkpoint_status(path: String, kinds: Option<Vec<String>>) -> CheckpointStatus {
     let p = PathBuf::from(&path);
-    let cp = engine::checkpoint_for(&p);
-    let out = engine::carve_dir_for(&p);
+    let kinds = normalize_kinds(kinds);
+    let cp = engine::checkpoint_for(&p, &kinds);
+    let out = engine::carve_dir_for(&p, &kinds);
     CheckpointStatus {
         exists: cp.exists() && out.exists(),
         checkpoint_path: cp.to_string_lossy().into_owned(),
@@ -436,5 +449,36 @@ mod tests {
         let b = unique_target(dir.path(), "x.txt");
         assert_ne!(a, b, "second target must not overwrite the first");
         assert!(a.exists() && !b.exists());
+    }
+
+    /// The kind picker maps user categories onto unearth's extension set:
+    /// photos pull in jpg/png, videos mp4 — and a changed selection must get
+    /// its own carve dir/checkpoint instead of resuming the old scan.
+    #[test]
+    fn kinds_expand_and_key_by_selection() {
+        let img = engine::allowed_exts(&["image".into()]);
+        assert!(img.contains("jpg") && img.contains("png") && img.contains("heic"));
+        assert!(!img.contains("mp4"), "image kind must not include video exts");
+
+        let vid = engine::allowed_exts(&["video".into()]);
+        assert!(vid.contains("mp4") && vid.contains("mov") && vid.contains("avi"));
+
+        let docs = engine::allowed_exts(&["document".into()]);
+        assert!(docs.contains("pdf") && docs.contains("docx") && docs.contains("xlsx"));
+
+        let src = std::path::Path::new("/tmp");
+        let k_all = vec!["image".to_string(), "video".to_string()];
+        let k_rev = vec!["video".to_string(), "image".to_string()];
+        let k_img = vec!["image".to_string()];
+        assert_eq!(
+            engine::source_key(src, &k_all),
+            engine::source_key(src, &k_rev),
+            "kind order must not matter"
+        );
+        assert_ne!(
+            engine::source_key(src, &k_all),
+            engine::source_key(src, &k_img),
+            "a changed selection must get its own checkpoint"
+        );
     }
 }

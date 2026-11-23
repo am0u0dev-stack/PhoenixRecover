@@ -14,8 +14,13 @@ export function listSources(): Promise<SourceInfo[]> {
   return invoke("list_sources");
 }
 
-export function scanDrive(path: string, deep: boolean, resume = false): Promise<RecoverableFile[]> {
-  return invoke("scan_drive", { path, deep, resume });
+export function scanDrive(
+  path: string,
+  deep: boolean,
+  resume = false,
+  kinds: string[] = [],
+): Promise<RecoverableFile[]> {
+  return invoke("scan_drive", { path, deep, resume, kinds });
 }
 
 export function recoverFiles(ids: string[], outputDir: string): Promise<RecoveryReport> {
@@ -34,8 +39,8 @@ export function scanHistory(): Promise<HistoryEntry[]> {
   return invoke("scan_history");
 }
 
-export function checkpointStatus(path: string): Promise<CheckpointStatus> {
-  return invoke("checkpoint_status", { path });
+export function checkpointStatus(path: string, kinds: string[] = []): Promise<CheckpointStatus> {
+  return invoke("checkpoint_status", { path, kinds });
 }
 
 export function fileHexPreview(path: string): Promise<FilePreview> {
