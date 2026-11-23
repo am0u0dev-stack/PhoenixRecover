@@ -38,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y testdisk
           mkdir -p src-tauri/bin
-          ln -sf /usr/bin/photorec src-tauri/bin/photorec
+          cp /usr/bin/photorec src-tauri/bin/photorec-x86_64-unknown-linux-gnu
 
       - name: Build bundles (deb, rpm, appimage)
         run: |
@@ -77,7 +77,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
-          Copy-Item src-tauri/sidecar-photorec/* src-tauri/bin/
+          Copy-Item src-tauri/sidecar-photorec/photorec_win.exe src-tauri/bin/photorec-x86_64-pc-windows-msvc.exe
+          Copy-Item src-tauri/sidecar-photorec/*.dll src-tauri/bin/
 
       - name: Build bundles (msi, nsis)
         run: |
