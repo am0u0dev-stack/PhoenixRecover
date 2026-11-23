@@ -238,7 +238,7 @@ export default function App() {
                 </h2>
                 <p className="mt-1 max-w-prose text-sm" style={{ color: "var(--muted)" }}>
                   Undelete via NTFS, FAT, exFAT, ext4 and HFS+ metadata, or carve byte-level
-                  signatures across 150+ formats with unearth and forsmost. Every source
+                  signatures across 480+ formats with the PhotoRec engine. Every source
                   operation is strictly read-only.
                 </p>
               </div>
@@ -246,6 +246,39 @@ export default function App() {
                 <RefreshCw size={15} aria-hidden /> Refresh
               </button>
             </div>
+
+            {/* Wizard strip, like desktop recovery apps: where am I in the flow. */}
+            <ol className="mt-4 flex flex-wrap items-center gap-2" aria-label="Recovery steps">
+              {[
+                { n: 1, label: "Select source" },
+                { n: 2, label: scanning ? "Scanning…" : "Scan" },
+                { n: 3, label: "Recover files" },
+              ].map((s, i) => {
+                const active = s.n === 1 ? !scanning && files.length === 0 : s.n === 2 ? scanning : !scanning && files.length > 0;
+                return (
+                  <li key={s.n} className="flex items-center gap-2">
+                    {i > 0 ? <span aria-hidden style={{ color: "var(--faint)" }}>→</span> : null}
+                    <span
+                      className="mono flex items-center gap-2 rounded border px-3 py-1.5 text-xs"
+                      style={{
+                        borderColor: active ? "var(--accent)" : "var(--border)",
+                        color: active ? "var(--accent)" : "var(--muted)",
+                        background: active ? "var(--surface-2)" : "transparent",
+                      }}
+                    >
+                      <span
+                        className="flex h-4 w-4 items-center justify-center rounded-full text-[10px]"
+                        style={{ border: `1px solid ${active ? "var(--accent)" : "var(--border)"}` }}
+                        aria-hidden
+                      >
+                        {s.n}
+                      </span>
+                      {s.label}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
 
             {status === "unavailable" ? (
               <div
