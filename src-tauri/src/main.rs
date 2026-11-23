@@ -200,16 +200,19 @@ fn scan_drive(
     // is staged and shown in the results table like any other source.
     if p.is_dir() {
         if deep {
-            if let Some(dev) = backing_device(&p) {
-                notes.push(format!("deep-scanning underlying device {} via PhotoRec", dev.display()));
-                match photorec_pass::run(&dev, &engine::staging_root_pub(), &kinds, &mut notes) {
-                    Ok(out_dir) => {
-                        let allowed = engine::allowed_exts(&kinds);
-                        engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(dev) = backing_device(&p) {
+                    notes.push(format!("deep-scanning underlying device {} via PhotoRec", dev.display()));
+                    match photorec_pass::run(&dev, &engine::staging_root_pub(), &kinds, &mut notes) {
+                        Ok(out_dir) => {
+                            let allowed = engine::allowed_exts(&kinds);
+                            engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+                        }
+                        Err(e) => notes.push(format!("PhotoRec scan failed: {e}")),
                     }
-                    Err(e) => notes.push(format!("PhotoRec scan failed: {e}")),
+                    return finish_scan(&p, deep, files, notes);
                 }
-                return finish_scan(&p, deep, files, notes);
             }
         }
         scan_folder(&p, deep, resume, &kinds, &mut files, &mut notes, handle)?;
