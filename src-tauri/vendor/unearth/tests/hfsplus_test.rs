@@ -1,0 +1,157 @@
+//! HFS+ undelete: recover a deleted file from a catalog leaf node's free space.
+
+mod common;
+
+use unearth::recover::{self, RecoverOptions};
+use unearth::source::Source;
+
+fn write_img(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let img = tmp.path().join("disk.img");
+    std::fs::write(&img, bytes).unwrap();
+    (tmp, img)
+}
+
+#[test]
+fn detects_and_recovers_a_deleted_file() {
+    let payload = b"the quick brown fox jumps over the lazy dog";
+    let (tmp, img) = write_img(&common::hfsplus_volume("notes.txt", payload));
+    let src = Source::open(&img).unwrap();
+
+    let vols = recover::detect(&src).unwrap();
+    assert_eq!(vols.len(), 1);
+    assert_eq!(vols[0].fs_label(), "HFS+");
+
+    let out = tmp.path().join("out");
+    let stats = vols[0]
+        .recover_deleted(&src, &out, &RecoverOptions::default())
+        .unwrap();
+
+    assert_eq!(stats.recovered, 1);
+    assert_eq!(stats.bytes_recovered, payload.len() as u64);
+    assert_eq!(std::fs::read(out.join("notes.txt")).unwrap(), payload);
+}
+
+#[test]
+fn recovers_a_multi_block_file_byte_for_byte() {
+    // Larger than one 512-byte allocation block, so the extent spans blocks.
+    let payload: Vec<u8> = (0..1500u32).map(|i| (i % 251) as u8).collect();
+    let (tmp, img) = write_img(&common::hfsplus_volume("data.bin", &payload));
+    let src = Source::open(&img).unwrap();
+
+    let vols = recover::detect(&src).unwrap();
+    let out = tmp.path().join("out");
+    let stats = vols[0]
+        .recover_deleted(&src, &out, &RecoverOptions::default())
+        .unwrap();
+
+    assert_eq!(stats.recovered, 1);
+    assert_eq!(std::fs::read(out.join("data.bin")).unwrap(), payload);
+}
+
+#[test]
+fn dry_run_reports_without_writing() {
+    let (tmp, img) = write_img(&common::hfsplus_volume("secret.dat", b"hello hfs+"));
+    let src = Source::open(&img).unwrap();
+    let vols = recover::detect(&src).unwrap();
+
+    let out = tmp.path().join("out");
+    let opts = RecoverOptions {
+        min_size: 0,
+        max_size: None,
+        modified_after: None,
+        modified_before: None,
+        names: Vec::new(),
+        exclude_names: Vec::new(),
+        dry_run: true,
+    };
+    let stats = vols[0].recover_deleted(&src, &out, &opts).unwrap();
+
+    assert_eq!(stats.recovered, 1);
+    assert!(!out.exists(), "dry run must not write files");
+}
+
+#[test]
+fn restores_the_original_folder_path() {
+    // The deleted file lived inside a live folder "Documents"; recovery should
+    // rebuild that path from the catalog's folder hierarchy.
+    let payload = b"nested file body";
+    let (tmp, img) = write_img(&common::hfsplus_nested_volume(
+        "Documents",
+        "memo.txt",
+        payload,
+    ));
+    let src = Source::open(&img).unwrap();
+
+    let vols = recover::detect(&src).unwrap();
+    let out = tmp.path().join("out");
+    let stats = vols[0]
+        .recover_deleted(&src, &out, &RecoverOptions::default())
+        .unwrap();
+
+    assert_eq!(stats.recovered, 1);
+    assert_eq!(
+        std::fs::read(out.join("Documents").join("memo.txt")).unwrap(),
+        payload
+    );
+}
+
+#[test]
+fn recovers_a_fragmented_file_via_the_extents_overflow_tree() {
+    // The file's tail lives in a non-contiguous extent recorded only in the
+    // extents-overflow B-tree, not inline in the catalog record.
+    let payload: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
+    let (tmp, img) = write_img(&common::hfsplus_fragmented_volume("split.bin", &payload));
+    let src = Source::open(&img).unwrap();
+
+    let vols = recover::detect(&src).unwrap();
+    let out = tmp.path().join("out");
+    let stats = vols[0]
+        .recover_deleted(&src, &out, &RecoverOptions::default())
+        .unwrap();
+
+    assert_eq!(stats.recovered, 1, "the fragmented file is fully recovered");
+    assert_eq!(std::fs::read(out.join("split.bin")).unwrap(), payload);
+}
+
+#[test]
+fn free_extents_reads_the_allocation_bitmap() {
+    // The builder marks the volume header, allocation, catalog, and data blocks
+    // allocated (MSB-first) and leaves the rest free.
+    let (_tmp, img) = write_img(&common::hfsplus_volume("notes.txt", b"hi"));
+    let src = Source::open(&img).unwrap();
+    let vol = unearth::hfsplus::Volume::parse(&src, 0).unwrap();
+
+    // createDate / modifyDate decode from the HFS epoch to Unix seconds.
+    assert_eq!(vol.created_time(), Some(1_600_000_000));
+    assert_eq!(vol.written_time(), Some(1_700_000_000));
+
+    let free = vol.free_extents(&src).unwrap();
+    let bs = 512u64;
+    let covered = |block: u64| {
+        let off = block * bs;
+        free.iter().any(|&(s, l)| off >= s && off < s + l)
+    };
+    assert!(covered(11), "block 11 is free");
+    assert!(!covered(2), "block 2 (volume header) is allocated");
+    assert!(!covered(8), "block 8 (catalog) is allocated");
+    assert!(!covered(12), "block 12 (file data) is allocated");
+}
+
+#[test]
+fn unicode_name_is_preserved() {
+    let (tmp, img) = write_img(&common::hfsplus_volume("café — not.txt", b"unicode body"));
+    let src = Source::open(&img).unwrap();
+    let vols = recover::detect(&src).unwrap();
+
+    let out = tmp.path().join("out");
+    let stats = vols[0]
+        .recover_deleted(&src, &out, &RecoverOptions::default())
+        .unwrap();
+    assert_eq!(stats.recovered, 1);
+    // The ':' separator is the only character HFS+ forbids; the rest survive.
+    assert_eq!(
+        std::fs::read(out.join("café — not.txt")).unwrap(),
+        b"unicode body"
+    );
+}

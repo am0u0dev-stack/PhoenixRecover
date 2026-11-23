@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "phoenixrecover"
-version = "0.2.1"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4243,8 +4243,6 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "unearth"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d976dadf706bf234219e0b6fb6f253b684bf1e367828988700b8c15a1b8506ba"
 dependencies = [
  "anyhow",
  "clap",

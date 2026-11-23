@@ -49,7 +49,7 @@ export default function HistoryPanel({ refreshKey }: { refreshKey: number }) {
             className="mono flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs"
           >
             <span style={{ color: "var(--faint)" }}>
-              {new Date(e.ts + "Z").toLocaleString()}
+              {new Date(e.at.replace(" ", "T") + "Z").toLocaleString()}
             </span>
             <span className="uppercase" style={{ color: "var(--accent)" }}>{e.kind}</span>
             <span className="min-w-0 flex-1 truncate" style={{ color: "var(--text)" }} title={e.source}>

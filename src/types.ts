@@ -60,7 +60,8 @@ export interface HistoryEntry {
   detail: string;
   files: number;
   bytes: number;
-  ts: string;
+  /** SQLite `datetime('now')` — "YYYY-MM-DD HH:MM:SS" (UTC, no zone). */
+  at: string;
 }
 
 export interface RecoveryReport {

@@ -1,0 +1,313 @@
+//! Timestamp conversion and application helpers shared by the undelete
+//! backends, so recovered files keep their original modification (and access)
+//! times.
+//!
+//! Each filesystem stores time differently:
+//!
+//! * ext uses 32-bit Unix seconds (UTC).
+//! * NTFS uses 64-bit Windows `FILETIME` (100 ns ticks since 1601, UTC).
+//! * FAT/exFAT use packed "DOS" date+time fields in **local** time; without a
+//!   recorded time zone we treat them as UTC, which can be off by the machine's
+//!   offset. The date is preserved exactly.
+
+use std::fs::File;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Apply modified/accessed times to a freshly written file. Best effort: any
+/// error (e.g. an unsupported platform) is ignored.
+pub fn apply(file: &File, modified: Option<SystemTime>, accessed: Option<SystemTime>) {
+    if modified.is_none() && accessed.is_none() {
+        return;
+    }
+    let mut times = std::fs::FileTimes::new();
+    if let Some(m) = modified {
+        times = times.set_modified(m);
+    }
+    if let Some(a) = accessed {
+        times = times.set_accessed(a);
+    }
+    let _ = file.set_times(times);
+}
+
+/// 32-bit Unix seconds (ext) to a `SystemTime`.
+pub fn from_unix(secs: u32) -> Option<SystemTime> {
+    if secs == 0 {
+        None
+    } else {
+        Some(UNIX_EPOCH + Duration::from_secs(secs as u64))
+    }
+}
+
+/// Windows `FILETIME` (100 ns ticks since 1601-01-01 UTC) to a `SystemTime`.
+pub fn from_filetime(ft: u64) -> Option<SystemTime> {
+    if ft == 0 {
+        return None;
+    }
+    const EPOCH_DIFF_SECS: u64 = 11_644_473_600; // 1601-01-01 .. 1970-01-01
+    let secs_total = ft / 10_000_000;
+    if secs_total < EPOCH_DIFF_SECS {
+        return None;
+    }
+    let unix = secs_total - EPOCH_DIFF_SECS;
+    let nanos = (ft % 10_000_000) * 100;
+    Some(UNIX_EPOCH + Duration::new(unix, nanos as u32))
+}
+
+/// Packed DOS date+time (FAT) to a `SystemTime`, treated as UTC.
+///
+/// `date`: bits 0-4 day, 5-8 month, 9-15 year since 1980.
+/// `time`: bits 0-4 seconds/2, 5-10 minute, 11-15 hour.
+pub fn from_dos(date: u16, time: u16) -> Option<SystemTime> {
+    if date == 0 {
+        return None;
+    }
+    let day = (date & 0x1F) as i64;
+    let month = ((date >> 5) & 0x0F) as i64;
+    let year = 1980 + ((date >> 9) & 0x7F) as i64;
+    let sec = ((time & 0x1F) * 2) as i64;
+    let min = ((time >> 5) & 0x3F) as i64;
+    let hour = ((time >> 11) & 0x1F) as i64;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let secs = days_from_civil(year, month, day) * 86_400 + hour * 3600 + min * 60 + sec;
+    if secs < 0 {
+        return None;
+    }
+    Some(UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// exFAT packs the date in the high 16 bits and the time in the low 16 bits.
+pub fn from_exfat(ts: u32) -> Option<SystemTime> {
+    if ts == 0 {
+        return None;
+    }
+    from_dos((ts >> 16) as u16, (ts & 0xFFFF) as u16)
+}
+
+/// Parse a UTC date (`YYYY-MM-DD`) or date-time (`YYYY-MM-DDTHH:MM:SS`, with a
+/// space also accepted as the separator) into a [`SystemTime`]. Used by the
+/// `--modified-after`/`--modified-before` recovery filters; with no recorded
+/// time zone, all times are treated as UTC, matching how timestamps are read
+/// back from the filesystems. Returns an error string suitable for clap.
+pub fn parse_date(s: &str) -> Result<SystemTime, String> {
+    let s = s.trim();
+    let (date, time) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t)),
+        None => (s, None),
+    };
+    let mut dp = date.split('-');
+    let year = next_num(&mut dp, "year", s)?;
+    let month = next_num(&mut dp, "month", s)?;
+    let day = next_num(&mut dp, "day", s)?;
+    if dp.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(format!("invalid date '{s}' (expected YYYY-MM-DD)"));
+    }
+    let (mut h, mut mi, mut sec) = (0i64, 0i64, 0i64);
+    if let Some(t) = time {
+        let mut tp = t.split(':');
+        h = next_num(&mut tp, "hour", s)?;
+        mi = next_num(&mut tp, "minute", s)?;
+        sec = tp.next().map_or(0, |v| v.parse().unwrap_or(-1));
+        if tp.next().is_some()
+            || !(0..=23).contains(&h)
+            || !(0..=59).contains(&mi)
+            || !(0..=60).contains(&sec)
+        {
+            return Err(format!("invalid time in '{s}' (expected HH:MM[:SS])"));
+        }
+    }
+    let secs = days_from_civil(year, month, day) * 86400 + h * 3600 + mi * 60 + sec;
+    if secs < 0 {
+        return Err(format!("date '{s}' is before the Unix epoch (1970)"));
+    }
+    Ok(UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// Parse the next `-`/`:`-separated numeric field, or report a clear error.
+fn next_num<'a>(
+    parts: &mut impl Iterator<Item = &'a str>,
+    field: &str,
+    whole: &str,
+) -> Result<i64, String> {
+    parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("invalid {field} in '{whole}'"))
+}
+
+/// Days from 1970-01-01 to a civil (proleptic Gregorian) date.
+/// Howard Hinnant's `days_from_civil` algorithm.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Civil (proleptic Gregorian) `(year, month, day)` from days since 1970-01-01.
+/// The inverse of [`days_from_civil`] (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (y + if m <= 2 { 1 } else { 0 }, m, d)
+}
+
+/// Parse an ISO 9660 "date and time" field — 16 ASCII digits
+/// `YYYYMMDDHHMMSScc` followed by a 1-byte signed GMT offset in 15-minute
+/// intervals — into Unix seconds (UTC). Returns `None` when the field is unset
+/// (all-zero or all-`'0'`) or malformed. The hundredths-of-a-second digits are
+/// ignored.
+pub fn iso9660_datetime(field: &[u8]) -> Option<u64> {
+    if field.len() < 17 {
+        return None;
+    }
+    // An unrecorded field is all binary zeros or all ASCII '0'.
+    if field[..16].iter().all(|&b| b == 0) || field[..16].iter().all(|&b| b == b'0') {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let s = std::str::from_utf8(&field[r]).ok()?;
+        s.parse::<i64>().ok()
+    };
+    let year = num(0..4)?;
+    let month = num(4..6)?;
+    let day = num(6..8)?;
+    let hour = num(8..10)?;
+    let min = num(10..12)?;
+    let sec = num(12..14)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    // The 17th byte is a signed offset from GMT in 15-minute units; subtract it
+    // to convert the recorded local time to UTC.
+    let tz_secs = (field[16] as i8) as i64 * 15 * 60;
+    let total = days * 86_400 + hour * 3600 + min * 60 + sec - tz_secs;
+    u64::try_from(total).ok()
+}
+
+/// Parse an ISO 9660 **directory-record** date/time — the compact 7-byte binary
+/// form (`years-since-1900`, month, day, hour, minute, second, signed GMT offset
+/// in 15-minute units) — into a [`SystemTime`]. `None` when the field is unset
+/// (all-zero) or out of range. Distinct from [`iso9660_datetime`], which parses
+/// the 17-byte ASCII form in the volume descriptor.
+pub fn from_iso9660_dir(b: &[u8]) -> Option<SystemTime> {
+    if b.len() < 7 || b[..6].iter().all(|&x| x == 0) {
+        return None;
+    }
+    let (year, month, day) = (1900 + b[0] as i64, b[1] as i64, b[2] as i64);
+    let (hour, min, sec) = (b[3] as i64, b[4] as i64, b[5] as i64);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let tz = (b[6] as i8) as i64 * 15 * 60;
+    let total = days_from_civil(year, month, day) * 86_400 + hour * 3600 + min * 60 + sec - tz;
+    Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(total).ok()?))
+}
+
+/// Format a Unix timestamp (seconds since 1970-01-01 UTC) as an ISO-8601 UTC
+/// string, `YYYY-MM-DDTHH:MM:SSZ`.
+pub fn format_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_roundtrip() {
+        let t = from_unix(1_600_000_000).unwrap();
+        let d = t.duration_since(UNIX_EPOCH).unwrap();
+        assert_eq!(d.as_secs(), 1_600_000_000);
+    }
+
+    #[test]
+    fn formats_utc_timestamps() {
+        assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_utc(1_600_000_000), "2020-09-13T12:26:40Z");
+        assert_eq!(format_utc(315_532_800), "1980-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn dos_epoch_is_1980() {
+        // 1980-01-01 00:00:00 => date day=1 month=1 year=0.
+        let date = (1 << 5) | 1; // month=1, day=1, year=0
+        let t = from_dos(date, 0).unwrap();
+        let secs = t.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(secs, 315_532_800); // 1980-01-01 UTC
+    }
+
+    #[test]
+    fn filetime_unix_epoch() {
+        // FILETIME for 1970-01-01 is exactly EPOCH_DIFF_SECS * 10^7.
+        let ft = 11_644_473_600u64 * 10_000_000;
+        let t = from_filetime(ft).unwrap();
+        assert_eq!(t.duration_since(UNIX_EPOCH).unwrap().as_secs(), 0);
+    }
+
+    #[test]
+    fn parse_date_handles_dates_and_datetimes() {
+        // 2021-01-01 is 18628 days after the epoch.
+        assert_eq!(
+            parse_date("2021-01-01").unwrap(),
+            UNIX_EPOCH + Duration::from_secs(18628 * 86400)
+        );
+        assert_eq!(parse_date("1970-01-01").unwrap(), UNIX_EPOCH);
+        let dt = UNIX_EPOCH + Duration::from_secs(18628 * 86400 + 12 * 3600 + 30 * 60 + 5);
+        assert_eq!(parse_date("2021-01-01T12:30:05").unwrap(), dt);
+        assert_eq!(parse_date("2021-01-01 12:30:05").unwrap(), dt);
+    }
+
+    #[test]
+    fn iso9660_datetime_parses_and_applies_tz() {
+        // 2021-01-01 12:00:00, GMT offset 0.
+        let mut f = *b"2021010112000000\0";
+        let base = 18628 * 86400 + 12 * 3600;
+        assert_eq!(iso9660_datetime(&f), Some(base as u64));
+        // GMT offset +8h = 32 fifteen-minute units, so UTC is 8h earlier.
+        f[16] = 32;
+        assert_eq!(iso9660_datetime(&f), Some((base - 8 * 3600) as u64));
+        // An unrecorded field (all '0' digits) is None.
+        assert_eq!(iso9660_datetime(b"0000000000000000\0"), None);
+        // Malformed (non-numeric) is None.
+        assert_eq!(iso9660_datetime(b"notadatevalue!!!\0"), None);
+    }
+
+    #[test]
+    fn from_iso9660_dir_parses_binary_date() {
+        // 2021-01-01 00:00:00, GMT offset 0 (year byte = 2021-1900 = 121).
+        let b = [121u8, 1, 1, 0, 0, 0, 0];
+        let secs = from_iso9660_dir(&b)
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(secs, 18628 * 86400);
+        // All-zero is unset.
+        assert_eq!(from_iso9660_dir(&[0u8; 7]), None);
+    }
+
+    #[test]
+    fn parse_date_rejects_bad_input() {
+        assert!(parse_date("2021-13-01").is_err());
+        assert!(parse_date("2021-01-32").is_err());
+        assert!(parse_date("not-a-date").is_err());
+        assert!(parse_date("2021-01-01T25:00").is_err());
+        assert!(parse_date("1969-01-01").is_err());
+    }
+}

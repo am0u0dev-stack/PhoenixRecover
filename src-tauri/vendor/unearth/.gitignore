@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Recovery output and test artifacts
+/recovered
+*.img
+
+# Heap profiler output (dhat)
+dhat-heap.json
