@@ -360,7 +360,9 @@ pub fn carve_scan(
         output_dir: out_dir.clone(),
         start: 0,
         end: None,
-        min_size: 512,
+        // Small thumbnails and short recordings are real recoveries; a low
+        // floor just skips stray single-magic noise.
+        min_size: 16,
         max_size: None,
         max_files: None,
         allow_nested: false,
@@ -387,9 +389,11 @@ pub fn carve_scan(
         return Ok(());
     }
 
-    // Office formats through the real forsmost engine (skip when the picker
-    // excluded documents — unearth's document signatures still carved OOXML).
-    if kinds.iter().any(|k| k.eq_ignore_ascii_case("document")) {
+    // Second full carve pass through the real forsmost engine — a completely
+    // independent implementation. Whatever one engine misses (signature
+    // variants, edge-case validation, OOXML zips) the other may still catch;
+    // dedup happens by staged filename below.
+    if !was_cancelled() {
         if let Some(handle) = &app {
             let _ = handle.emit(
                 "scan-progress",
@@ -398,16 +402,16 @@ pub fn carve_scan(
                     percent: -1.0,
                     bytes_scanned: 0,
                     total_bytes: 0,
-                    note: "forsmost: docx/pptx/xlsx pass".into(),
+                    note: "forsmost second pass".into(),
                 },
             );
         }
-        match crate::forsmost_pass::run(path, &staging_root(), notes) {
+        match crate::forsmost_pass::run(path, &staging_root(), kinds, notes) {
             Ok(office_dir) => {
                 let allowed = allowed_exts(kinds);
                 collect_staged(&office_dir, ScanStrategy::Carve, files, 0, &allowed)
             }
-            Err(_) => { /* note already recorded; unearth signatures covered these types */ }
+            Err(_) => { /* note already recorded; unearth covered these types */ }
         }
     }
 

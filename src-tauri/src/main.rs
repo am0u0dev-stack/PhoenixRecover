@@ -542,6 +542,66 @@ pub fn run() {
         .expect("error while running PhoenixRecover");
 }
 
+/// Full-pipeline reproduction of the user's report: files written, then
+/// "deleted" (metadata area wiped, clusters intact) — the app's own deep scan
+/// (engine::carve_scan) must surface both photos, not nothing.
+#[test]
+fn deep_scan_finds_deleted_photos() {
+    use std::io::Write;
+
+    // Minimal 1x1 PNG and JPEG bodies, like tests/engine_test.rs builds.
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    const JPG: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
+        0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+    ];
+
+    let tmp = tempfile::tempdir().unwrap();
+    let img = tmp.path().join("flash.img");
+    {
+        let mut f = fs::File::create(&img).unwrap();
+        f.write_all(&[0xA5u8; 4096]).unwrap();
+        f.write_all(PNG).unwrap();
+        f.write_all(&[0xA5u8; 4096]).unwrap();
+        f.write_all(JPG).unwrap();
+        f.sync_all().unwrap();
+    }
+    // "Delete": wipe the metadata area, data clusters stay intact.
+    {
+        use std::io::{Seek, SeekFrom};
+        let mut f = fs::OpenOptions::new().write(true).open(&img).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[0u8; 4096]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let mut files = Vec::new();
+    let mut notes = Vec::new();
+    engine::carve_scan(
+        &img,
+        &["image".to_string()],
+        &mut files,
+        &mut notes,
+        None,
+        false,
+    )
+    .expect("deep scan must succeed");
+    let exts: std::collections::HashSet<String> =
+        files.iter().filter_map(|f| f.name.split('.').next_back().map(String::from)).collect();
+    assert!(
+        exts.contains("jpg") && exts.contains("png"),
+        "deleted photos must be found by the app's deep scan: files={:?} notes={:?}",
+        files.iter().map(|f| (&f.name, f.size)).collect::<Vec<_>>(),
+        notes
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
