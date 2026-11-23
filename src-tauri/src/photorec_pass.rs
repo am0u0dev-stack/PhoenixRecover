@@ -4,8 +4,11 @@
 //!
 //! PhotoRec is never modified and the source is only ever read.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 /// Resolve the bundled photorec binary: env override, the Tauri sidecar
 /// location next to the app executable, then PATH.
@@ -65,15 +68,65 @@ pub fn run(
     } else {
         format!("{filters},search")
     };
-    let mut cmd = Command::new(&bin);
-    cmd.arg("/d").arg(&base).arg("/cmd").arg(input).arg(&script);
 
-    let out = cmd.output()?;
-    if !out.status.success() && !out.stderr.is_empty() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if err.contains("syntax error") {
-            notes.push(format!("PhotoRec: filter syntax rejected ({err}); full-format carve ran instead"));
+    // PhotoRec's /cmd mode checks for a terminal and silently exits without
+    // carving when stdin/stdout are pipes (verified on 7.2: exit 0, empty
+    // report). A pseudo-terminal makes it run identically to the interactive
+    // build on every platform (Unix pty / Windows ConPTY).
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 50,
+            cols: 200,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| anyhow::anyhow!("pty open failed: {e}"))?;
+    let mut command = CommandBuilder::new(&bin);
+    command.arg("/d");
+    command.arg(&base);
+    command.arg("/cmd");
+    command.arg(input);
+    command.arg(&script);
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|e| anyhow::anyhow!("failed to launch PhotoRec: {e}"))?;
+    drop(pair.slave);
+
+    // Drain the pty on a thread so PhotoRec never blocks on a full buffer;
+    // poll the child so the app's cancel flag can stop the scan.
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| anyhow::anyhow!("pty reader failed: {e}"))?;
+    let pump = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
+    let mut cancelled = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(e) => {
+                let _ = pump.join();
+                return Err(anyhow::anyhow!("PhotoRec failed: {e}"));
+            }
         }
+        if crate::engine::was_cancelled() {
+            cancelled = true;
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    drop(pair.master);
+    let _ = pump.join();
+    if cancelled {
+        notes.push("PhotoRec: scan cancelled by user".into());
     }
 
     // PhotoRec writes recup results into `<base>.N` siblings; also accept the
