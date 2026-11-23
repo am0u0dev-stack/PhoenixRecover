@@ -64,7 +64,48 @@ impl Source {
         Ok(Source { file, size })
     }
 
-    /// Read the device size through IOCTL_DISK_GET_LENGTH_INFO — the only
+    /// Read up to `buf.len()` bytes starting at absolute `offset`.
+    ///
+    /// Returns the number of bytes actually read, which may be short at the end
+    /// of the device. Uses positioned reads so it does not disturb (or depend
+    /// on) the file's seek cursor.
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let mut total = 0;
+            while total < buf.len() {
+                match self.file.read_at(&mut buf[total..], offset + total as u64) {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e).context("reading from source"),
+                }
+            }
+            Ok(total)
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::Read;
+            // Fall back to seek + read on non-unix platforms. This needs &mut,
+            // so clone a handle to keep `read_at` taking &self.
+            let mut f = self.file.try_clone().context("cloning source handle")?;
+            f.seek(SeekFrom::Start(offset)).context("seeking source")?;
+            let mut total = 0;
+            while total < buf.len() {
+                match f.read(&mut buf[total..]) {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e).context("reading from source"),
+                }
+            }
+            Ok(total)
+        }
+    }
+}
+
+/// Read the device size through IOCTL_DISK_GET_LENGTH_INFO — the only
 /// reliable way for a Windows volume handle (\\.\C:), which reports no size
 /// through metadata and rejects FILE_END seeks.
 #[cfg(windows)]
@@ -113,43 +154,3 @@ fn volume_size(file: &File) -> anyhow::Result<u64> {
     Ok(out.length as u64)
 }
 
-/// Read up to `buf.len()` bytes starting at absolute `offset`.
-    ///
-    /// Returns the number of bytes actually read, which may be short at the end
-    /// of the device. Uses positioned reads so it does not disturb (or depend
-    /// on) the file's seek cursor.
-    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            let mut total = 0;
-            while total < buf.len() {
-                match self.file.read_at(&mut buf[total..], offset + total as u64) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e).context("reading from source"),
-                }
-            }
-            Ok(total)
-        }
-        #[cfg(not(unix))]
-        {
-            use std::io::Read;
-            // Fall back to seek + read on non-unix platforms. This needs &mut,
-            // so clone a handle to keep `read_at` taking &self.
-            let mut f = self.file.try_clone().context("cloning source handle")?;
-            f.seek(SeekFrom::Start(offset)).context("seeking source")?;
-            let mut total = 0;
-            while total < buf.len() {
-                match f.read(&mut buf[total..]) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e).context("reading from source"),
-                }
-            }
-            Ok(total)
-        }
-    }
-}
