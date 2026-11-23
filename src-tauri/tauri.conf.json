@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PhoenixRecover",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "identifier": "com.mlai.phoenixrecover",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,9 +26,23 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "appimage", "msi", "nsis"],
-    "externalBin": ["bin/forsmost"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage",
+      "msi",
+      "nsis"
+    ],
+    "externalBin": [
+      "bin/forsmost"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "linux": {
       "deb": {
         "depends": [],
@@ -45,6 +59,26 @@
       "nsis": {
         "installMode": "perMachine"
       }
-    }
+    },
+    "resources": [
+      {
+        "bin/cygewf-2.dll": "bin/"
+      },
+      {
+        "bin/cyggcc_s-1.dll": "bin/"
+      },
+      {
+        "bin/cygwin1.dll": "bin/"
+      },
+      {
+        "bin/cygz.dll": "bin/"
+      },
+      {
+        "bin/cygncursesw-10.dll": "bin/"
+      },
+      {
+        "bin/libwinpthread-1.dll": "bin/"
+      }
+    ]
   }
 }

@@ -1,0 +1,40 @@
+Using locale 'C.UTF-8'.
+
+
+Mon Nov 23 13:45:56 2026
+Command line: PhotoRec /log /d /tmp/pr-run/rec /cmd /tmp/pr.img fileopt,everything,disable,jpg,enable,png,enable,search
+
+PhotoRec 7.2, Data Recovery Utility, February 2024
+Christophe GRENIER <grenier@cgsecurity.org>
+https://www.cgsecurity.org
+OS: Linux, kernel 6.18.56 (#1 SMP Fri Nov 20 05:34:02 UTC 2026) x86_64
+Compiler: GCC 15.2
+ext2fs lib: 1.47.2, ntfs lib: libntfs-3g, ewf lib: none, libjpeg: libjpeg-turbo-2.1.5, curses lib: ncurses 6.6
+User is not root!
+Hard disk list
+Disk /tmp/pr.img - 16 MB / 16 MiB - CHS 3 255 63 (RO), sector size=512
+
+Partition table type defaults to None
+Disk /tmp/pr.img - 16 MB / 16 MiB (RO)
+Partition table type: None
+   P Unknown                  0   0  1     2  10  8      32768
+
+Interface File Select
+4 first-level signatures enabled
+
+Analyse
+   P Unknown                  0   0  1     2  10  8      32768
+Pass 0 (blocksize=512) STATUS_FIND_OFFSET
+blocksize=65536, offset=0
+Elapsed time 0h00m01s
+Pass 1 (blocksize=65536) STATUS_EXT2_OFF
+/tmp/pr-run/rec.1/f0002048.jpg	 2048-2175
+/tmp/pr-run/rec.1/f0006144.png	 6144-6271
+Elapsed time 0h00m01s
+Pass 1 +2 files
+jpg: 1/1 recovered
+png: 1/1 recovered
+Total: 2 files found
+
+32512 sectors contain unknown data, 0 invalid files found and rejected.
+PhotoRec exited normally.

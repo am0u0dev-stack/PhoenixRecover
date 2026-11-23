@@ -5,6 +5,7 @@
 
 mod engine;
 mod forsmost_pass;
+mod photorec_pass;
 mod read_only;
 mod store;
 mod types;
@@ -194,11 +195,32 @@ fn scan_drive(
         }
     }
 
+    // Deep scan: drive the real PhotoRec CLI (CGSecurity) — the strongest
+    // open-source carver, 480+ formats, proven on formatted media. Its output
+    // is staged and shown in the results table like any other source.
     if p.is_dir() {
+        if deep {
+            if let Some(dev) = backing_device(&p) {
+                notes.push(format!("deep-scanning underlying device {} via PhotoRec", dev.display()));
+                match photorec_pass::run(&dev, &engine::staging_root_pub(), &kinds, &mut notes) {
+                    Ok(out_dir) => {
+                        let allowed = engine::allowed_exts(&kinds);
+                        engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+                    }
+                    Err(e) => notes.push(format!("PhotoRec scan failed: {e}")),
+                }
+                return finish_scan(&p, deep, files, notes);
+            }
+        }
         scan_folder(&p, deep, resume, &kinds, &mut files, &mut notes, handle)?;
     } else if deep {
-        engine::carve_scan(&p, &kinds, &mut files, &mut notes, handle, resume)
-            .map_err(|e| format!("deep scan failed: {e}"))?;
+        match photorec_pass::run(&p, &engine::staging_root_pub(), &kinds, &mut notes) {
+            Ok(out_dir) => {
+                let allowed = engine::allowed_exts(&kinds);
+                engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+            }
+            Err(e) => return Err(format!("deep scan failed: {e}")),
+        }
     } else {
         match engine::undelete_scan(&p, &kinds, &mut files, &mut notes, handle) {
             Ok(stats) => {
@@ -600,6 +622,53 @@ fn deep_scan_finds_deleted_photos() {
         files.iter().map(|f| (&f.name, f.size)).collect::<Vec<_>>(),
         notes
     );
+}
+
+/// The photorec-backed deep scan path: real PhotoRec CLI over an image with
+/// a real PNG "deleted". Skips (passes) when no photorec binary exists in
+/// the environment, so CI without the backend stays green.
+#[test]
+fn photorec_backend_finds_deleted_photos() {
+    if photorec_pass::run(std::path::Path::new("/dev/null"), &engine::staging_root_pub(), &[], &mut Vec::new()).is_err() {
+        eprintln!("photorec unavailable in this environment; skipping");
+        return;
+    }
+
+    // A real PNG (with valid chunks PhotoRec can validate), embedded at an
+    // offset after the wiped "filesystem" area.
+    let png = test_png_bytes();
+    let tmp = tempfile::tempdir().unwrap();
+    let img = tmp.path().join("flash.img");
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = fs::File::create(&img).unwrap();
+        f.write_all(&[0xA5u8; 4096]).unwrap();
+        f.write_all(&png).unwrap();
+        f.sync_all().unwrap();
+        let _ = f.seek(SeekFrom::Start(0));
+    }
+
+    let mut notes = Vec::new();
+    let out_dir = photorec_pass::run(
+        &img,
+        &engine::staging_root_pub(),
+        &["image".to_string()],
+        &mut notes,
+    )
+    .expect("photorec run must succeed");
+    let mut files = Vec::new();
+    let allowed = engine::allowed_exts(&["image".to_string()]);
+    engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+    assert!(
+        files.iter().any(|f| f.name.ends_with(".png")),
+        "photorec-backed deep scan must surface the deleted photo: files={files:?} notes={notes:?}"
+    );
+}
+
+/// A real 128x128 PNG (the app icon), so PhotoRec's validation accepts it.
+fn test_png_bytes() -> Vec<u8> {
+    const ICON: &[u8] = include_bytes!("../icons/128x128.png");
+    ICON.to_vec()
 }
 
 #[cfg(test)]

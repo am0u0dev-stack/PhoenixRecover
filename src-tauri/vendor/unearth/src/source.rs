@@ -33,20 +33,25 @@ impl Source {
         let size = if meta_len > 0 {
             meta_len
         } else {
-            // Block devices: discover size by seeking to the end.
-            file.seek(SeekFrom::End(0)).or_else(|_| {
-                #[cfg(windows)]
-                {
-                    // Volume device handles (\\.\C:) reject FILE_END seeks
-                    // with ERROR_INVALID_FUNCTION; ask the device itself.
-                    volume_size(&file).with_context(|| format!("determining size of {}", path.display()))
+            // Block devices: discover size by seeking to the end. Windows
+            // volume handles (\\.\C:) reject FILE_END seeks with
+            // ERROR_INVALID_FUNCTION, so fall back to asking the device.
+            let seeked = file.seek(SeekFrom::End(0));
+            match seeked {
+                Ok(sz) => sz,
+                Err(_e) => {
+                    #[cfg(windows)]
+                    {
+                        volume_size(&file)
+                            .with_context(|| format!("determining size of {}", path.display()))?
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        return Err(anyhow::Error::msg("cannot determine device size"))
+                            .with_context(|| format!("determining size of {}", path.display()));
+                    }
                 }
-                #[cfg(not(windows))]
-                {
-                    Err(anyhow::Error::msg("cannot determine device size"))
-                        .with_context(|| format!("determining size of {}", path.display()))
-                }
-            })?
+            }
         };
 
         if size == 0 {

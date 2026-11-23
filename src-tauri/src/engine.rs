@@ -161,6 +161,11 @@ pub fn checkpoint_for(path: &Path, kinds: &[String]) -> PathBuf {
     base.join(format!("{}.ckpt", source_key(path, kinds)))
 }
 
+/// Public accessor for the photorec backend module.
+pub fn staging_root_pub() -> PathBuf {
+    staging_root()
+}
+
 fn staging_root() -> PathBuf {
     let base = std::env::var("PHOENIX_STAGING_DIR")
         .map(PathBuf::from)
@@ -267,6 +272,17 @@ fn volume_name(volume: &Volume) -> String {
 }
 
 /// Walk a staging directory and turn validated copies into result rows.
+/// Public accessor for the photorec backend module.
+pub fn collect_staged_pub(
+    dir: &Path,
+    strategy: ScanStrategy,
+    files: &mut Vec<RecoverableFile>,
+    recovered: usize,
+    allowed: &std::collections::HashSet<String>,
+) {
+    collect_staged(dir, strategy, files, recovered, allowed)
+}
+
 fn collect_staged(
     dir: &Path,
     strategy: ScanStrategy,

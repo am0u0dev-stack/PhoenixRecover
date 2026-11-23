@@ -31,8 +31,14 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Build forsmost sidecar
-        run: bash src-tauri/build-forsmost-sidecar.sh x86_64-unknown-linux-gnu
+      # PhotoRec (CGSecurity) is the recovery backend; the distro package
+      # ships it and Tauri bundles it as a resource for the sidecar lookup.
+      - name: Install PhotoRec backend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y testdisk
+          mkdir -p src-tauri/bin
+          ln -sf /usr/bin/photorec src-tauri/bin/photorec
 
       - name: Build bundles (deb, rpm, appimage)
         run: |
@@ -64,13 +70,14 @@ jobs:
           node-version: 22
           cache: npm
 
-      # forsmost has no published Windows binary; build it from the crate.
-      - name: Build forsmost sidecar
+      # Bundle the official PhotoRec Windows binaries (CGSecurity, portable
+      # zip) as the GUI's recovery backend. Checked into the tree at
+      # sidecar-photorec/ so the runner needs no download step.
+      - name: Stage PhotoRec sidecar
         shell: pwsh
         run: |
-          cargo install --locked --root .sidecar forsmost
           New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
-          Copy-Item .sidecar/bin/forsmost.exe src-tauri/bin/forsmost-x86_64-pc-windows-msvc.exe
+          Copy-Item src-tauri/sidecar-photorec/* src-tauri/bin/
 
       - name: Build bundles (msi, nsis)
         run: |
