@@ -34,7 +34,8 @@
       "nsis"
     ],
     "externalBin": [
-      "bin/forsmost"
+      "bin/forsmost",
+      "bin/photorec"
     ],
     "icon": [
       "icons/32x32.png",
