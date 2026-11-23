@@ -2,6 +2,11 @@ export type SourceKind = "drive" | "folder" | "image";
 export type DeviceType = "ssd" | "hdd" | "usb" | "sd" | "unknown";
 export type ScanStrategy = "undelete" | "carve";
 
+export interface ScanOutcome {
+  files: RecoverableFile[];
+  notes: string[];
+}
+
 export interface SourceInfo {
   name: string;
   path: string;

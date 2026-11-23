@@ -2,9 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   CheckpointStatus,
+  ScanOutcome,
   FilePreview,
   HistoryEntry,
-  RecoverableFile,
   RecoveryReport,
   ScanProgress,
   SourceInfo,
@@ -19,7 +19,7 @@ export function scanDrive(
   deep: boolean,
   resume = false,
   kinds: string[] = [],
-): Promise<RecoverableFile[]> {
+): Promise<ScanOutcome> {
   return invoke("scan_drive", { path, deep, resume, kinds });
 }
 

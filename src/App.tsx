@@ -21,6 +21,7 @@ export default function App() {
   const [scanDeep, setScanDeep] = useState(false);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [files, setFiles] = useState<RecoverableFile[]>([]);
+  const [notes, setNotes] = useState<string[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [report, setReport] = useState<RecoveryReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,8 +74,9 @@ export default function App() {
     setError(null);
     setReport(null);
     try {
-      const found = await scanDrive(path, deep, resume, kindList);
-      setFiles(found);
+      const outcome = await scanDrive(path, deep, resume, kindList);
+      setFiles(outcome.files);
+      setNotes(outcome.notes);
       setSelectedIds(new Set());
       setHistoryKey((k) => k + 1);
     } catch (e) {
@@ -355,7 +357,17 @@ export default function App() {
               className="min-h-[280px] flex-1 overflow-hidden rounded-lg border"
               style={{ borderColor: "var(--border)", background: "var(--surface)" }}
             >
-              <ResultsTable files={files} selectedIds={selectedIds} onToggle={toggle} onToggleAll={toggleAll} />
+              {notes.length > 0 && files.length === 0 ? (
+                <ul className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
+                  {notes.map((n) => (
+                    <li key={n} className="mono max-w-md text-xs leading-relaxed" style={{ color: "var(--muted)" }}>
+                      {n}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <ResultsTable files={files} selectedIds={selectedIds} onToggle={toggle} onToggleAll={toggleAll} />
+              )}
             </div>
           </section>
 

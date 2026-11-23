@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use types::{CheckpointStatus, FilePreview, HexRow, RecoverableFile, RecoveryReport, ScanStrategy, SourceInfo, SourceKind, DeviceType};
+use types::{CheckpointStatus, FilePreview, HexRow, RecoverableFile, RecoveryReport, ScanOutcome, ScanStrategy, SourceInfo, SourceKind, DeviceType};
 
 /// Monotonic id source for result rows.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -137,7 +137,7 @@ fn scan_drive(
     deep: bool,
     resume: bool,
     kinds: Option<Vec<String>>,
-) -> Result<Vec<RecoverableFile>, String> {
+) -> Result<ScanOutcome, String> {
     engine::reset_cancel();
     let p = PathBuf::from(&path);
     if !p.exists() {
@@ -148,6 +148,51 @@ fn scan_drive(
     let mut files: Vec<RecoverableFile> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let handle = Some(app);
+
+    // Windows drive roots ("E:\") *are* directories, but walking a formatted
+    // volume's filesystem finds nothing. Recovery must happen on the raw
+    // volume (\\.\E:): undelete from metadata, or carve free space byte by
+    // byte. Opening the raw device needs administrator rights — say so
+    // instead of silently scanning an empty folder.
+    #[cfg(target_os = "windows")]
+    if is_drive_root(&p) {
+        let raw = raw_volume(&p);
+        if deep {
+            if let Err(e) = engine::carve_scan(&raw, &kinds, &mut files, &mut notes, handle, resume) {
+                if raw_open_denied(&e) {
+                    notes.push("raw volume access denied — right-click PhoenixRecover and run as administrator to scan a drive".into());
+                } else {
+                    return Err(format!("deep scan failed: {e}"));
+                }
+            }
+        } else {
+            match engine::undelete_scan(&raw, &kinds, &mut files, &mut notes, handle) {
+                Ok(stats) if stats.is_empty() => {
+                    notes.push("no metadata candidates — try Deep Scan for signature carving".into());
+                }
+                Ok(_) => {}
+                Err(e) if raw_open_denied(&e) => {
+                    notes.push("raw volume access denied — right-click PhoenixRecover and run as administrator to scan a drive".into());
+                }
+                Err(e) => notes.push(format!("undelete scan failed: {e}")),
+            }
+        }
+        return finish_scan(&p, deep, files, notes);
+    }
+
+    // Linux mounted-media roots (/media/usb): a filesystem walk of a
+    // formatted stick sees nothing, so resolve the backing block device
+    // and carve that instead when a deep scan is requested.
+    #[cfg(target_os = "linux")]
+    if p.is_dir() && deep {
+        if let Some(dev) = backing_device(&p) {
+            notes.push(format!("carving underlying device {} (free space is not part of any file)", dev.display()));
+            if let Err(e) = engine::carve_scan(&dev, &kinds, &mut files, &mut notes, handle, resume) {
+                notes.push(format!("deep scan of {dev:?} failed: {e}"));
+            }
+            return finish_scan(&p, deep, files, notes);
+        }
+    }
 
     if p.is_dir() {
         scan_folder(&p, deep, resume, &kinds, &mut files, &mut notes, handle)?;
@@ -165,7 +210,16 @@ fn scan_drive(
         }
     }
 
-    // Assign final ids and remember the staging paths for recovery.
+    finish_scan(&p, deep, files, notes)
+}
+
+/// Shared tail of `scan_drive`: final ids, staging bookkeeping, history.
+fn finish_scan(
+    path: &Path,
+    deep: bool,
+    files: Vec<RecoverableFile>,
+    notes: Vec<String>,
+) -> Result<ScanOutcome, String> {
     let mut result = Vec::with_capacity(files.len());
     let mut store = LAST_SCAN.lock().unwrap();
     store.get_or_insert_with(Vec::new);
@@ -177,9 +231,67 @@ fn scan_drive(
     *store = Some(result.clone());
 
     let total_bytes: u64 = result.iter().map(|f| f.size).sum();
-    store::record_scan(&path, deep, result.len(), total_bytes);
+    store::record_scan(&path.to_string_lossy(), deep, result.len(), total_bytes);
 
-    Ok(result)
+    Ok(ScanOutcome { files: result, notes })
+}
+
+/// Windows drive roots: "E:\" or "E:".
+#[cfg(target_os = "windows")]
+fn is_drive_root(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    let s = s.strip_suffix('\\').unwrap_or(&s);
+    match s.strip_suffix(':') {
+        Some(prefix) => prefix.len() == 1 && prefix.as_bytes()[0].is_ascii_alphabetic(),
+        None => false,
+    }
+}
+
+/// "E:\" → "\\.\E:" (the Win32 raw volume path).
+#[cfg(target_os = "windows")]
+fn raw_volume(p: &Path) -> PathBuf {
+    let letter: String = p.to_string_lossy().chars().take(1).collect();
+    PathBuf::from(format!(r"\\.\{letter}:"))
+}
+
+/// Heuristic on backend error text: the raw device could not be opened.
+fn raw_open_denied(e: &anyhow::Error) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = e;
+        false
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let s = format!("{e:#}").to_lowercase();
+        s.contains("access is denied") || s.contains("permission") || s.contains("os error 5")
+    }
+}
+
+/// Find the block device a mounted directory lives on (longest mount-point
+/// prefix match over /proc/mounts).
+#[cfg(target_os = "linux")]
+fn backing_device(dir: &Path) -> Option<PathBuf> {
+    let target = fs::canonicalize(dir).ok()?;
+    let mut best: Option<(usize, PathBuf)> = None;
+    let mounts = fs::read_to_string("/proc/mounts").ok()?;
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let dev = fields.next()?.to_string();
+        let mount = fields.next()?;
+        if !dev.starts_with("/dev/") {
+            continue;
+        }
+        let mnt = PathBuf::from(mount.replace("\\040", " "));
+        let canon = fs::canonicalize(&mnt).unwrap_or(mnt);
+        if target.starts_with(&canon) {
+            let len = canon.as_os_str().len();
+            if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
+                best = Some((len, PathBuf::from(dev)));
+            }
+        }
+    }
+    best.map(|(_, d)| d)
 }
 
 /// Fill in the picker's selection: missing/empty means every category.

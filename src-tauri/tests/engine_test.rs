@@ -175,3 +175,54 @@ fn carve_checkpoint_resume_round_trip() {
     assert!(png_ok && jpg_ok, "resumed carve must keep byte-identical copies");
 }
 
+
+
+/// The user's reported scenario: photos written to a flash stick, then the
+/// stick quick-formatted (metadata wiped). A quick format zeroes the FAT/root
+/// directory but leaves file clusters in place — carving must still recover
+/// the photos from raw bytes.
+#[test]
+fn carve_recovers_photos_after_quick_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let img = make_image(tmp.path());
+
+    // Simulate a quick format: wipe the first block (boot sector, FAT, root
+    // directory). File data beyond it stays untouched.
+    {
+        use std::io::{Seek, SeekFrom};
+        let mut f = fs::OpenOptions::new().write(true).open(&img).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[0u8; 4096]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let out = tmp.path().join("carved-fmt");
+    fs::create_dir_all(&out).unwrap();
+    let src = unearth::source::Source::open(&img).unwrap();
+    let sigs = unearth::signatures::select(&["jpg".to_string(), "png".to_string()]).unwrap();
+    let opts = unearth::carver::CarveOptions {
+        output_dir: out.clone(),
+        start: 0,
+        end: None,
+        min_size: 0,
+        max_size: None,
+        max_files: None,
+        allow_nested: false,
+        validate: true,
+        dedup: false,
+        progress: false,
+        checkpoint: None,
+        resume: false,
+        organize: false,
+        dry_run: false,
+        align: 1,
+    };
+    let stats = unearth::carver::carve(&src, &sigs, &opts, &unearth::carver::NoProgress).unwrap();
+    assert!(stats.files_recovered >= 2, "post-format carve must find the photos");
+
+    let mut kinds = std::collections::HashSet::new();
+    for entry in fs::read_dir(&out).unwrap() {
+        kinds.insert(entry.unwrap().path().extension().unwrap().to_string_lossy().to_string());
+    }
+    assert!(kinds.contains("jpg") && kinds.contains("png"), "both photos must come back: {:?}", kinds);
+}

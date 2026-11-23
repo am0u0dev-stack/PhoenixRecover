@@ -74,6 +74,14 @@ pub struct ScanProgress {
     pub note: String,
 }
 
+/// Result of `scan_drive`: the recoverable rows plus engine notes (why a
+/// scan found nothing, permission problems, carve statistics) shown in the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanOutcome {
+    pub files: Vec<RecoverableFile>,
+    pub notes: Vec<String>,
+}
+
 /// Summary returned after writing selected files to the output directory.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecoveryReport {
