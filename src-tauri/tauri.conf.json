@@ -62,24 +62,12 @@
       }
     },
     "resources": [
-      {
-        "bin/cygewf-2.dll": "bin/"
-      },
-      {
-        "bin/cyggcc_s-1.dll": "bin/"
-      },
-      {
-        "bin/cygwin1.dll": "bin/"
-      },
-      {
-        "bin/cygz.dll": "bin/"
-      },
-      {
-        "bin/cygncursesw-10.dll": "bin/"
-      },
-      {
-        "bin/libwinpthread-1.dll": "bin/"
-      }
+      "bin/cygewf-2.dll",
+      "bin/cyggcc_s-1.dll",
+      "bin/cygwin1.dll",
+      "bin/cygz.dll",
+      "bin/cygncursesw-10.dll",
+      "bin/libwinpthread-1.dll"
     ]
   }
 }
