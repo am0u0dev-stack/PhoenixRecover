@@ -5,3 +5,19 @@ src-tauri/staging
 src-tauri/.sidecar
 src-tauri/bin
 *.local
+
+# Local build artifacts & forensic scratch files
+photorec.log
+photorec.se2
+*.deb
+*.rpm
+*.AppImage
+*.msi
+*.exe
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
