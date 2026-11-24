@@ -21,10 +21,22 @@ fn photorec_binary() -> Option<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for name in ["photorec", "photorec_win.exe"] {
-                let sidecar = dir.join(name);
-                if sidecar.is_file() {
-                    return Some(sidecar);
+            // Tauri `externalBin` installs `bin/photorec-<triple>.exe` with the
+            // triple stripped, i.e. `photorec.exe` next to the app executable;
+            // the DLL resources land under `<exe dir>/bin/`. Try every layout.
+            let dirs = [dir.to_path_buf(), dir.join("bin")];
+            let names = [
+                "photorec",
+                "photorec.exe",
+                "photorec_win.exe",
+                "photorec-x86_64-pc-windows-msvc.exe",
+            ];
+            for name in names {
+                for base in &dirs {
+                    let sidecar = base.join(name);
+                    if sidecar.is_file() {
+                        return Some(sidecar);
+                    }
                 }
             }
         }
@@ -83,6 +95,30 @@ pub fn run(
         })
         .map_err(|e| anyhow::anyhow!("pty open failed: {e}"))?;
     let mut command = CommandBuilder::new(&bin);
+    // The bundled PhotoRec is a cygwin build whose DLLs ship as Tauri
+    // resources under `<app>/bin/`. Windows DLL search consults PATH, so
+    // prepend the app dir, that resource dir and the binary's own dir.
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = bin.parent() {
+        search_dirs.push(parent.to_path_buf());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            search_dirs.push(dir.to_path_buf());
+            search_dirs.push(dir.join("bin"));
+        }
+    }
+    if let Ok(existing) = std::env::join_paths(
+        search_dirs
+            .iter()
+            .cloned()
+            .chain({
+                let raw = std::env::var_os("PATH").unwrap_or_default();
+                std::env::split_paths(&raw).collect::<Vec<PathBuf>>()
+            }),
+    ) {
+        command.env("PATH", existing);
+    }
     command.arg("/d");
     command.arg(&base);
     command.arg("/cmd");
