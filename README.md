@@ -1,5 +1,3 @@
-<div align="center">
-
 # PhoenixRecover
 
 **Professional, read-only data recovery for the desktop.**
