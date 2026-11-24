@@ -114,10 +114,9 @@ pub fn run(
             while !stop.load(Ordering::Relaxed) {
                 let (n, bytes) = count_staged(&dir);
                 if n > 0 {
-                    p.backend_progress(
-                        None,
-                        &format!("PhotoRec: {n} files ({bytes}) recovered so far"),
-                    );
+                    // Note only: the percent comes from PhotoRec's own display
+                    // (parsed off the pty); resetting it here would fight it.
+                    p.set_note(&format!("PhotoRec: {n} files ({bytes}) recovered so far"));
                 }
                 std::thread::sleep(Duration::from_millis(1200));
             }
@@ -167,6 +166,7 @@ pub fn run(
                         &dll_dir(&bin),
                         &mut cancelled,
                         notes,
+                        p,
                     );
                 }
                 return Err(anyhow::anyhow!("failed to launch PhotoRec: {e}"));
@@ -180,11 +180,33 @@ pub fn run(
             .master
             .try_clone_reader()
             .map_err(|e| anyhow::anyhow!("pty reader failed: {e}"))?;
-        let pump = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = reader.read_to_end(&mut buf);
-            buf
-        });
+        // Drain the pty in chunks and parse PhotoRec's own percent display
+        // (its curses UI prints e.g. " 13.75%") into live real progress.
+        let pump = {
+            let progress = progress.clone();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let (Some(p), Some(pct)) =
+                                (progress.as_ref(), parse_photorec_percent(&buf))
+                            {
+                                p.backend_progress(
+                                    Some(pct),
+                                    &format!("PhotoRec: deep scan {pct:.1}%"),
+                                );
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                buf
+            })
+        };
 
         loop {
             match child.try_wait() {
@@ -240,10 +262,14 @@ pub fn run(
 }
 
 /// Windows-only fallback: the bundled PhotoRec requires an elevated token
-/// (CreateProcess fails with os error 740). Launch it through
-/// ShellExecuteExW with the "runas" verb — the normal UAC path — hidden
-/// (SW_HIDE, so no console window pops over the app) and wait on the
-/// returned handle so cancellation still works.
+/// (CreateProcess fails with os error 740). Launching a console app directly
+/// through ShellExecuteExW("runas") still pops a black terminal window, so
+/// the relaunch goes through `wscript.exe` (GUI subsystem — no console at
+/// all): one UAC prompt, then the VBS starts PhotoRec itself elevated and
+/// hidden, with its output redirected to a log. That log is polled here to
+/// feed PhotoRec's own percent into the live progress bar; a marker file
+/// written after PhotoRec exits ends the wait, and cancellation kills the
+/// carver via an elevated taskkill.
 #[cfg(windows)]
 fn run_elevated_windows(
     bin: &Path,
@@ -253,32 +279,64 @@ fn run_elevated_windows(
     workdir: &Path,
     cancelled: &mut bool,
     notes: &mut Vec<String>,
+    progress: &crate::engine::Progress,
 ) -> anyhow::Result<()> {
+    use crate::engine::was_cancelled;
+
+    let log = workdir.join("photorec-elevated.log");
+    let done = workdir.join("photorec-elevated.done");
+    let vbs = workdir.join("phoenix-elevate.vbs");
     let args = format!(
         "\"/d\" \"{}\" /cmd \"{}\" {script}",
         base.display(),
         input.display()
     );
-    let handle = launch_elevated_windows(bin, &args, workdir)?;
+    // cmd strips the outer quotes of `/c "..."`; the trailing echo is the
+    // completion marker PhotoRec's own exit can't give us across UAC.
+    let inner = format!("\"{bin}\" {args} > \"{log}\" 2>&1 & echo DONE > \"{done}\"");
+    let vbs_body = format!(
+        "Set sh = CreateObject(\"Shell.Application\")\r\nsh.ShellExecute \"cmd.exe\", \"/c \"\"{inner}\"\"\", \"{workdir}\", \"runas\", 0\r\n"
+    );
+    std::fs::write(&vbs, vbs_body).map_err(|e| anyhow::anyhow!("elevate script: {e}"))?;
+
+    let wscript = std::env::var_os("WINDIR")
+        .map(|w| std::path::PathBuf::from(w).join("System32").join("wscript.exe"))
+        .unwrap_or_else(|| std::path::PathBuf::from("wscript.exe"));
+    let vbs_args = format!("//B //Nologo \"{vbs}\"");
+    let handle = launch_elevated_windows(&wscript, &vbs_args, workdir)?;
     notes.push("PhotoRec: running elevated (UAC approved)".into());
+    let mut wscript_alive = true;
     loop {
-        let done = unsafe {
-            windows_sys::Win32::System::Threading::WaitForSingleObject(handle, 400)
-        };
-        if done == 0 {
-            break; // WAIT_OBJECT_0
-        }
-        if crate::engine::was_cancelled() {
-            *cancelled = true;
-            unsafe {
-                windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
+        // Feed the live bar from PhotoRec's own display redirected to the log.
+        if let Ok(text) = std::fs::read(&log) {
+            if let Some(pct) = parse_photorec_percent(&text) {
+                progress.backend_progress(Some(pct), &format!("PhotoRec: deep scan {pct:.1}%"));
             }
+        }
+        // The launcher script exits right after spawning the carver, so only
+        // the marker file (echoed after PhotoRec exits) means the scan ended.
+        if done.exists() {
             break;
         }
+        if was_cancelled() {
+            *cancelled = true;
+            let kill = format!(
+                "/c taskkill /F /IM {} > NUL",
+                bin.file_name().unwrap_or_default().to_string_lossy()
+            );
+            let _ = launch_elevated_windows(&std::path::PathBuf::from("cmd.exe"), &kill, workdir);
+            break;
+        }
+        if wscript_alive {
+            wscript_alive = unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(handle, 400)
+            } != 0;
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
     }
-    unsafe {
-        windows_sys::Win32::Foundation::CloseHandle(handle);
-    }
+    let _ = std::fs::remove_file(&vbs);
+    let _ = std::fs::remove_file(&done);
     Ok(())
 }
 
@@ -296,6 +354,41 @@ fn dll_dir(bin: &Path) -> PathBuf {
         }
     }
     bin.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// PhotoRec's curses UI redraws the whole screen; progress shows as a bare
+/// percentage like " 13.75%". Return the latest such reading, ignoring any
+/// number directly followed by a word character (so `recup_dir.7` or
+/// `7 files` never count).
+fn parse_photorec_percent(buf: &[u8]) -> Option<f64> {
+    let text = String::from_utf8_lossy(buf);
+    let mut best: Option<f64> = None;
+    let mut rest = &text[..];
+    while let Some(i) = rest.find('%') {
+        let before = rest[..i].bytes().rev().collect::<Vec<u8>>();
+        let mut j = 0;
+        while j < before.len() && (before[j].is_ascii_digit() || before[j] == b'.') {
+            j += 1;
+        }
+            // `before` is reversed; the digits sit at its start, so flip
+            // that slice back to source order before parsing it.
+            if j > 0 {
+                let digits: String = before[..j]
+                    .iter()
+                    .rev()
+                    .map(|b| *b as char)
+                    .collect();
+                let after = text.as_bytes().get(i + 1);
+                let word_after = matches!(after, Some(c) if c.is_ascii_alphanumeric() || *c == b'_');
+                if let Ok(v) = digits.parse::<f64>() {
+                if !word_after && (0.0..=100.0).contains(&v) {
+                    best = Some(v);
+                }
+            }
+        }
+        rest = &rest[i + 1..];
+    }
+    best
 }
 
 /// ShellExecuteExW("runas") returning the child's process handle. The
@@ -393,4 +486,29 @@ fn photorec_filters(kinds: &[String]) -> String {
         }
     }
     parts.join(",")
+}
+
+#[cfg(test)]
+mod percent_tests {
+    use super::parse_photorec_percent;
+
+    #[test]
+    fn parses_latest_percent_from_curses_output() {
+        let ui = "\r\x1b[2J PhotoRec 7.2 \r\n  13.75%\r\n Recovery successful. \r\n";
+        assert_eq!(parse_photorec_percent(ui.as_bytes()), Some(13.75));
+    }
+
+    #[test]
+    fn keeps_only_the_latest_reading() {
+        assert_eq!(
+            parse_photorec_percent(b" 1.25% ... 41.00% ... 87.5%"),
+            Some(87.5)
+        );
+    }
+
+    #[test]
+    fn ignores_non_progress_percentages() {
+        assert_eq!(parse_photorec_percent(b"recup_dir.7 50 files"), None);
+        assert_eq!(parse_photorec_percent(b"no numbers here"), None);
+    }
 }
