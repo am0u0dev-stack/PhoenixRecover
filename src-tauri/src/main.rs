@@ -589,8 +589,8 @@ fn main() {
 fn ensure_elevated() {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, TOKEN_QUERY};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
