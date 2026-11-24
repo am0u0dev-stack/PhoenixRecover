@@ -79,7 +79,7 @@ jobs:
           New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
           Copy-Item src-tauri/sidecar-photorec/photorec_win.exe src-tauri/bin/photorec-x86_64-pc-windows-msvc.exe
           Copy-Item src-tauri/sidecar-photorec/*.dll src-tauri/bin/
-          (Get-Content src-tauri/tauri.conf.json) -replace '\[\]', '["bin/cygewf-2.dll","bin/cyggcc_s-1.dll","bin/cygwin1.dll","bin/cygz.dll","bin/cygncursesw-10.dll","bin/libwinpthread-1.dll"]' | Set-Content src-tauri/tauri.conf.json
+          (Get-Content src-tauri/tauri.conf.json) -replace '"resources": \[\]', '"resources": ["bin/cygewf-2.dll","bin/cyggcc_s-1.dll","bin/cygwin1.dll","bin/cygz.dll","bin/cygncursesw-10.dll","bin/libwinpthread-1.dll"]' | Set-Content src-tauri/tauri.conf.json
 
       - name: Build bundles (msi, nsis)
         run: |

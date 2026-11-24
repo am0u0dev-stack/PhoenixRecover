@@ -60,8 +60,6 @@
         "installMode": "perMachine"
       }
     },
-    "resources": [
-      "bin/*.dll"
-    ]
+    "resources": []
   }
 }
