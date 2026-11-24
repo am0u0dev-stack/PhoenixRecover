@@ -158,6 +158,9 @@ pub fn run(
                 // no visible terminal, no manual admin step needed.
                 #[cfg(windows)]
                 if e.to_string().contains("740") {
+                    let elev_progress = progress
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("elevated relaunch requires progress"))?;
                     return run_elevated_windows(
                         &bin,
                         &base,
@@ -166,7 +169,7 @@ pub fn run(
                         &dll_dir(&bin),
                         &mut cancelled,
                         notes,
-                        p,
+                        &elev_progress,
                     );
                 }
                 return Err(anyhow::anyhow!("failed to launch PhotoRec: {e}"));
@@ -293,16 +296,22 @@ fn run_elevated_windows(
     );
     // cmd strips the outer quotes of `/c "..."`; the trailing echo is the
     // completion marker PhotoRec's own exit can't give us across UAC.
-    let inner = format!("\"{bin}\" {args} > \"{log}\" 2>&1 & echo DONE > \"{done}\"");
+    let inner = format!(
+        "\"{}\" {args} > \"{}\" 2>&1 & echo DONE > \"{}\"",
+        bin.display(),
+        log.display(),
+        done.display()
+    );
     let vbs_body = format!(
-        "Set sh = CreateObject(\"Shell.Application\")\r\nsh.ShellExecute \"cmd.exe\", \"/c \"\"{inner}\"\"\", \"{workdir}\", \"runas\", 0\r\n"
+        "Set sh = CreateObject(\"Shell.Application\")\r\nsh.ShellExecute \"cmd.exe\", \"/c \"\"{inner}\"\"\", \"{}\", \"runas\", 0\r\n",
+        workdir.display()
     );
     std::fs::write(&vbs, vbs_body).map_err(|e| anyhow::anyhow!("elevate script: {e}"))?;
 
     let wscript = std::env::var_os("WINDIR")
         .map(|w| std::path::PathBuf::from(w).join("System32").join("wscript.exe"))
         .unwrap_or_else(|| std::path::PathBuf::from("wscript.exe"));
-    let vbs_args = format!("//B //Nologo \"{vbs}\"");
+    let vbs_args = format!("//B //Nologo \"{}\"", vbs.display());
     let handle = launch_elevated_windows(&wscript, &vbs_args, workdir)?;
     notes.push("PhotoRec: running elevated (UAC approved)".into());
     let mut wscript_alive = true;
