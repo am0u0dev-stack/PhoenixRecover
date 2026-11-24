@@ -67,6 +67,9 @@ pub struct Progress {
     total: AtomicU64,
     scanned: AtomicU64,
     note: Mutex<String>,
+    /// Percent reported directly by an external backend (PhotoRec's own
+    /// display); when set it overrides the scanned/total computation.
+    fixed_percent: Mutex<Option<f64>>,
 }
 
 impl Progress {
@@ -76,7 +79,18 @@ impl Progress {
             total: AtomicU64::new(0),
             scanned: AtomicU64::new(0),
             note: Mutex::new(String::new()),
+            fixed_percent: Mutex::new(None),
         })
+    }
+
+    /// External-backend progress: `percent` comes straight from the backend's
+    /// own display (None = unknown → indeterminate bar); `note` carries live
+    /// human-readable status (e.g. staged-file count).
+    pub fn backend_progress(&self, percent: Option<f64>, note: &str) {
+        if let Ok(mut p) = self.fixed_percent.lock() {
+            *p = percent;
+        }
+        self.set_note(note);
     }
 
     pub fn set_note(&self, note: &str) {
@@ -93,10 +107,11 @@ impl Progress {
         if let Some(app) = &self.app {
             let scanned = self.scanned.load(Ordering::Relaxed);
             let total = self.total.load(Ordering::Relaxed);
-            let percent = if total > 0 {
-                (scanned.min(total) as f64 / total as f64) * 100.0
-            } else {
-                -1.0
+            let fixed = self.fixed_percent.lock().ok().and_then(|p| *p);
+            let percent = match fixed {
+                Some(p) => p,
+                None if total > 0 => (scanned.min(total) as f64 / total as f64) * 100.0,
+                None => -1.0,
             };
             let _ = app.emit(
                 "scan-progress",

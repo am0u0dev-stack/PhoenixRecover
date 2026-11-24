@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "phoenixrecover"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2696,6 +2696,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "unearth",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -132,7 +132,7 @@ fn guess_device_type(path: &Path) -> DeviceType {
 /// Scan a drive, folder or disk image. `deep` selects carving mode over
 /// undelete. Sources are opened read-only (see `read_only.rs`).
 #[tauri::command]
-fn scan_drive(
+async fn scan_drive(
     app: tauri::AppHandle,
     path: String,
     deep: bool,
@@ -146,10 +146,31 @@ fn scan_drive(
     }
     let kinds = normalize_kinds(kinds);
 
-    let mut files: Vec<RecoverableFile> = Vec::new();
-    let mut notes: Vec<String> = Vec::new();
+    let files: Vec<RecoverableFile> = Vec::new();
+    let notes: Vec<String> = Vec::new();
     let handle = Some(app);
 
+    // Blocking carve/undelete work (minutes for a deep scan) must not run on
+    // the command thread: it runs on Tauri's blocking pool so the window stays
+    // responsive and keeps showing the live progress bar.
+    tauri::async_runtime::spawn_blocking(move || {
+        let (mut files, mut notes) = (files, notes);
+        scan_drive_sync(p, deep, resume, kinds, handle, &mut files, &mut notes)
+    })
+    .await
+    .map_err(|e| format!("scan worker failed: {e}"))?
+}
+
+/// Synchronous body of the scan (runs on a blocking thread).
+fn scan_drive_sync(
+    p: PathBuf,
+    deep: bool,
+    resume: bool,
+    kinds: Vec<String>,
+    handle: Option<tauri::AppHandle>,
+    files: &mut Vec<RecoverableFile>,
+    notes: &mut Vec<String>,
+) -> Result<ScanOutcome, String> {
     // Windows drive roots ("E:\") *are* directories, but walking a formatted
     // volume's filesystem finds nothing. Recovery must happen on the raw
     // volume (\\.\E:): undelete from metadata, or carve free space byte by
@@ -163,17 +184,17 @@ fn scan_drive(
             // itself and carves by signature, which also recovers formatted
             // media (unearth's reader failed on some volume handles with
             // "reading from source").
-            match photorec_pass::run(&raw, &engine::staging_root_pub(), &kinds, &mut notes) {
+            match photorec_pass::run(&raw, &engine::staging_root_pub(), &kinds, Some(engine::Progress::new(handle.clone())), notes) {
                 Ok(out_dir) => {
                     let allowed = engine::allowed_exts(&kinds);
-                    engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+                    engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, files, 0, &allowed);
                 }
                 Err(e) => notes.push(format!(
                     "deep scan of {raw:?} failed: {e} — if access is denied, right-click PhoenixRecover and run as administrator"
                 )),
             }
         } else {
-            match engine::undelete_scan(&raw, &kinds, &mut files, &mut notes, handle) {
+            match engine::undelete_scan(&raw, &kinds, files, notes, handle) {
                 Ok(stats) if stats.is_empty() => {
                     notes.push("no metadata candidates — try Deep Scan for signature carving".into());
                 }
@@ -184,7 +205,7 @@ fn scan_drive(
                 Err(e) => notes.push(format!("undelete scan failed: {e}")),
             }
         }
-        return finish_scan(&p, deep, files, notes);
+        return finish_scan(&p, deep, std::mem::take(files), std::mem::take(notes));
     }
 
     // Linux mounted-media roots (/media/usb): a filesystem walk of a
@@ -194,10 +215,10 @@ fn scan_drive(
     if p.is_dir() && deep {
         if let Some(dev) = backing_device(&p) {
             notes.push(format!("carving underlying device {} (free space is not part of any file)", dev.display()));
-            if let Err(e) = engine::carve_scan(&dev, &kinds, &mut files, &mut notes, handle, resume) {
+            if let Err(e) = engine::carve_scan(&dev, &kinds, files, notes, handle, resume) {
                 notes.push(format!("deep scan of {dev:?} failed: {e}"));
             }
-            return finish_scan(&p, deep, files, notes);
+            return finish_scan(&p, deep, std::mem::take(files), std::mem::take(notes));
         }
     }
 
@@ -210,28 +231,28 @@ fn scan_drive(
             {
                 if let Some(dev) = backing_device(&p) {
                     notes.push(format!("deep-scanning underlying device {} via PhotoRec", dev.display()));
-                    match photorec_pass::run(&dev, &engine::staging_root_pub(), &kinds, &mut notes) {
+                    match photorec_pass::run(&dev, &engine::staging_root_pub(), &kinds, Some(engine::Progress::new(handle.clone())), notes) {
                         Ok(out_dir) => {
                             let allowed = engine::allowed_exts(&kinds);
-                            engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+                            engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, files, 0, &allowed);
                         }
                         Err(e) => notes.push(format!("PhotoRec scan failed: {e}")),
                     }
-                    return finish_scan(&p, deep, files, notes);
+                    return finish_scan(&p, deep, std::mem::take(files), std::mem::take(notes));
                 }
             }
         }
-        scan_folder(&p, deep, resume, &kinds, &mut files, &mut notes, handle)?;
+        scan_folder(&p, deep, resume, &kinds, files, notes, handle)?;
     } else if deep {
-        match photorec_pass::run(&p, &engine::staging_root_pub(), &kinds, &mut notes) {
+        match photorec_pass::run(&p, &engine::staging_root_pub(), &kinds, Some(engine::Progress::new(handle.clone())), notes) {
             Ok(out_dir) => {
                 let allowed = engine::allowed_exts(&kinds);
-                engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, &mut files, 0, &allowed);
+                engine::collect_staged_pub(&out_dir, ScanStrategy::Carve, files, 0, &allowed);
             }
             Err(e) => return Err(format!("deep scan failed: {e}")),
         }
     } else {
-        match engine::undelete_scan(&p, &kinds, &mut files, &mut notes, handle) {
+        match engine::undelete_scan(&p, &kinds, files, notes, handle) {
             Ok(stats) => {
                 if stats.is_empty() {
                     notes.push("no metadata candidates — try Deep Scan for signature carving".into());
@@ -241,7 +262,7 @@ fn scan_drive(
         }
     }
 
-    finish_scan(&p, deep, files, notes)
+    finish_scan(&p, deep, std::mem::take(files), std::mem::take(notes))
 }
 
 /// Shared tail of `scan_drive`: final ids, staging bookkeeping, history.
@@ -638,7 +659,7 @@ fn deep_scan_finds_deleted_photos() {
 /// the environment, so CI without the backend stays green.
 #[test]
 fn photorec_backend_finds_deleted_photos() {
-    if photorec_pass::run(std::path::Path::new("/dev/null"), &engine::staging_root_pub(), &[], &mut Vec::new()).is_err() {
+    if photorec_pass::run(std::path::Path::new("/dev/null"), &engine::staging_root_pub(), &[], None, &mut Vec::new()).is_err() {
         eprintln!("photorec unavailable in this environment; skipping");
         return;
     }
@@ -662,6 +683,7 @@ fn photorec_backend_finds_deleted_photos() {
         &img,
         &engine::staging_root_pub(),
         &["image".to_string()],
+        None,
         &mut notes,
     )
     .expect("photorec run must succeed");
