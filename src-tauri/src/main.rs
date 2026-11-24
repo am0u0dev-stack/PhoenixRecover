@@ -574,8 +574,73 @@ fn cancel_scan() -> Result<(), String> {
 }
 
 fn main() {
+    ensure_elevated();
     run();
 }
+
+/// On Windows the deep scan must read raw volumes (`\\.\F:`), which needs an
+/// elevated token, and PhotoRec only carves when attached to a terminal. Both
+/// are solved by running the app itself as administrator from the start: the
+/// ConPTY spawn is then windowless (no black terminal) and the live percent
+/// parses off the pty. So at startup, if not elevated, relaunch this exe via
+/// ShellExecuteExW("runas") — one UAC prompt — and exit; if the user declines,
+/// continue unelevated and the deep scan explains what it needs when run.
+#[cfg(windows)]
+fn ensure_elevated() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, TOKEN_QUERY};
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    let elevated = unsafe {
+        let mut elevation: i32 = 0;
+        let mut ret_len: u32 = 0;
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) != 0 {
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elevation as *mut i32 as *mut core::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+                &mut ret_len,
+            );
+            windows_sys::Win32::Foundation::CloseHandle(token);
+            ok != 0 && elevation != 0
+        } else {
+            false
+        }
+    };
+    if elevated {
+        return;
+    }
+
+    let exe = std::env::current_exe().unwrap_or_default();
+    let args = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let params: Vec<u16> = args.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    sei.fMask = SEE_MASK_NOASYNC;
+    sei.lpVerb = verb.as_ptr();
+    sei.lpFile = file.as_ptr();
+    sei.lpParameters = params.as_ptr();
+    sei.nShow = SW_SHOWNORMAL;
+    // Success relaunches elevated from the new instance; this one exits.
+    // SE_ERR_CANCELLED (1223) means the user declined — run unelevated.
+    if unsafe { ShellExecuteExW(&mut sei) } != 0 {
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_elevated() {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
